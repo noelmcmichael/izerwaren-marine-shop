@@ -1,5 +1,5 @@
 # Simplified Dockerfile for Shopify Integration
-FROM node:18-alpine
+FROM node:24-alpine
 
 # Install dependencies for native modules
 RUN apk add --no-cache libc6-compat

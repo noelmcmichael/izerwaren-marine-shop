@@ -1,7 +1,7 @@
 # Direct Build Dockerfile - Simple and Fast
 # Builds frontend directly without turbo workspace complexity
 
-FROM node:20-alpine AS base
+FROM node:24-alpine AS base
 
 # Install dependencies
 RUN apk add --no-cache libc6-compat openssl
@@ -38,7 +38,7 @@ ENV NODE_ENV=production \
 RUN npm run build
 
 # === PRODUCTION ===
-FROM node:20-alpine AS production
+FROM node:24-alpine AS production
 
 # Security setup
 RUN apk update && apk upgrade && \

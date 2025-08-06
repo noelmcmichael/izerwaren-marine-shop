@@ -1,7 +1,7 @@
 # Optimized Multi-Service Dockerfile for Izerwaren Monorepo
 # Builds both frontend and backend efficiently with proper caching
 
-FROM node:18-alpine AS base
+FROM node:24-alpine AS base
 
 # Install dependencies once for better caching
 RUN apk add --no-cache \
@@ -52,7 +52,7 @@ RUN npm run db:generate
 RUN npm run build --workspace=@izerwaren/backend
 
 # === PRODUCTION FRONTEND ===
-FROM node:18-alpine AS frontend-production
+FROM node:24-alpine AS frontend-production
 
 RUN apk add --no-cache \
     openssl \
@@ -83,7 +83,7 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
 CMD ["node", "apps/frontend/server.js"]
 
 # === PRODUCTION BACKEND ===
-FROM node:18-alpine AS backend-production
+FROM node:24-alpine AS backend-production
 
 RUN apk add --no-cache \
     openssl \

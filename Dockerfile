@@ -1,5 +1,5 @@
 # Frontend Dockerfile for Next.js application
-FROM node:18-alpine AS base
+FROM node:24-alpine AS base
 
 # Install dependencies for native modules and Prisma
 RUN apk add --no-cache libc6-compat python3 make g++ openssl openssl-dev
@@ -64,7 +64,7 @@ RUN npm run db:generate || echo "Prisma generate failed, continuing with build..
 RUN npm run build --workspace=@izerwaren/frontend
 
 # Production stage
-FROM node:18-alpine AS production
+FROM node:24-alpine AS production
 
 # Security: Install security updates and minimal dependencies
 RUN apk update && apk upgrade && \

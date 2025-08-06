@@ -1,7 +1,7 @@
 # Optimized version of current working Dockerfile
 # Based on current production setup but with improved efficiency
 
-FROM node:20-alpine AS base
+FROM node:24-alpine AS base
 
 # Install dependencies with better caching
 RUN apk add --no-cache libc6-compat openssl python3 make g++ && \
@@ -40,7 +40,7 @@ ENV NODE_ENV=production \
 RUN npm run build --workspace=izerwaren-frontend-hotfix
 
 # === PRODUCTION STAGE ===
-FROM node:20-alpine AS production
+FROM node:24-alpine AS production
 
 # Security updates and minimal dependencies
 RUN apk update && apk upgrade && \

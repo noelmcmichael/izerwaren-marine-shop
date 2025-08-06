@@ -1,13 +1,8 @@
 {
   "name": "izerwaren-marine-shop",
   "version": 2,
-  "buildCommand": "cd apps/frontend && npm run build",
-  "outputDirectory": "apps/frontend/.next",
-  "devCommand": "cd apps/frontend && npm run dev", 
-  "installCommand": "npm install && cd apps/frontend && npm install",
-  "framework": "nextjs",
+  "framework": "nextjs", 
   "regions": ["iad1"],
-  "rootDirectory": "apps/frontend",
   "headers": [
     {
       "source": "/(.*)",

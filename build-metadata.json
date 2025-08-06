@@ -1,0 +1,10 @@
+{
+  "buildTime": "2025-08-04T01:08:26Z",
+  "buildTag": "0803-1807-76d88af",
+  "gitCommit": "76d88af9377d07283b44cd9d2efe7155d499ab18",
+  "gitBranch": "main",
+  "images": {
+    "frontend": "us-central1-docker.pkg.dev/noelmc/izerwaren-revamp-2-0/izerwaren-revamp-2-0-web:0803-1807-76d88af",
+    "backend": "us-central1-docker.pkg.dev/noelmc/izerwaren-revamp-2-0/izerwaren-revamp-2-0-api:0803-1807-76d88af"
+  }
+}

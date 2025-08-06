@@ -1,0 +1,262 @@
+import { config } from './config';
+/**
+ * Monitoring utilities for production observability
+ * Integrates with Google Cloud Monitoring, Logging, and Trace
+ */
+
+// Health check response interface
+export interface HealthStatus {
+  status: 'healthy' | 'unhealthy' | 'degraded';
+  timestamp: string;
+  version: string;
+  environment: string;
+  services: {
+    database: ServiceHealth;
+    shopify: ServiceHealth;
+    firebase: ServiceHealth;
+  };
+  metrics?: {
+    responseTime?: number;
+    memoryUsage?: number;
+    uptime?: number;
+  };
+}
+
+export interface ServiceHealth {
+  status: 'healthy' | 'unhealthy' | 'unknown';
+  responseTime?: number;
+  error?: string;
+  lastCheck?: string;
+}
+
+// Custom logging for structured logs that integrate with Cloud Logging
+export class StructuredLogger {
+  private static instance: StructuredLogger;
+  
+  public static getInstance(): StructuredLogger {
+    if (!StructuredLogger.instance) {
+      StructuredLogger.instance = new StructuredLogger();
+    }
+    return StructuredLogger.instance;
+  }
+
+  private log(level: 'DEBUG' | 'INFO' | 'WARN' | 'ERROR', message: string, metadata?: any) {
+    const logEntry = {
+      timestamp: new Date().toISOString(),
+      severity: level,
+      message,
+      ...(metadata && { metadata }),
+      service: 'izerwaren-revamp-2-0-web',
+      version: config.app.version,
+      environment: config.environment,
+      // Add trace information if available
+      ...(this.getTraceContext() && { trace: this.getTraceContext() }),
+    };
+
+    // In production, this will be captured by Google Cloud Logging
+    console.log(JSON.stringify(logEntry));
+  }
+
+  private getTraceContext() {
+    // Extract trace information from headers or environment
+    // This would be populated by Cloud Trace middleware
+    if (typeof window === 'undefined') {
+      // Server-side: extract from request headers
+      return {
+        traceId: process.env.CLOUD_TRACE_CONTEXT?.split('/')[0],
+        spanId: process.env.CLOUD_TRACE_CONTEXT?.split('/')[1]?.split(';')[0],
+      };
+    }
+    return null;
+  }
+
+  public debug(message: string, metadata?: any) {
+    this.log('DEBUG', message, metadata);
+  }
+
+  public info(message: string, metadata?: any) {
+    this.log('INFO', message, metadata);
+  }
+
+  public warn(message: string, metadata?: any) {
+    this.log('WARN', message, metadata);
+  }
+
+  public error(message: string, error?: Error, metadata?: any) {
+    this.log('ERROR', message, {
+      ...(error && { 
+        error: {
+          name: error.name,
+          message: error.message,
+          stack: error.stack,
+        }
+      }),
+      ...metadata,
+    });
+  }
+}
+
+// Performance monitoring utility
+export class PerformanceMonitor {
+  private static metrics: Map<string, number> = new Map();
+
+  public static startTimer(operation: string): () => number {
+    const startTime = Date.now();
+    return () => {
+      const duration = Date.now() - startTime;
+      this.recordMetric(`${operation}_duration_ms`, duration);
+      return duration;
+    };
+  }
+
+  public static recordMetric(name: string, value: number) {
+    this.metrics.set(name, value);
+    
+    // Log metric for Cloud Monitoring
+    StructuredLogger.getInstance().info('metric_recorded', {
+      metric_name: name,
+      metric_value: value,
+      metric_type: 'gauge',
+    });
+  }
+
+  public static getMetrics(): Record<string, number> {
+    return Object.fromEntries(this.metrics.entries());
+  }
+
+  public static clearMetrics() {
+    this.metrics.clear();
+  }
+}
+
+// Business metrics tracking
+export class BusinessMetrics {
+  private static logger = StructuredLogger.getInstance();
+
+  public static trackPageView(page: string, userId?: string) {
+    this.logger.info('page_view', {
+      page,
+      user_id: userId,
+      business_event: 'page_view',
+    });
+  }
+
+  public static trackProductView(productId: string, userId?: string) {
+    this.logger.info('product_view', {
+      product_id: productId,
+      user_id: userId,
+      business_event: 'product_view',
+    });
+  }
+
+  public static trackCartAction(action: 'add' | 'remove' | 'update', productId: string, quantity: number, userId?: string) {
+    this.logger.info('cart_action', {
+      action,
+      product_id: productId,
+      quantity,
+      user_id: userId,
+      business_event: 'cart_action',
+    });
+  }
+
+  public static trackRFQSubmission(productIds: string[], userId?: string) {
+    this.logger.info('rfq_submission', {
+      product_ids: productIds,
+      product_count: productIds.length,
+      user_id: userId,
+      business_event: 'rfq_submission',
+    });
+  }
+
+  public static trackSearchQuery(query: string, resultCount: number, userId?: string) {
+    this.logger.info('search_query', {
+      search_query: query,
+      result_count: resultCount,
+      user_id: userId,
+      business_event: 'search',
+    });
+  }
+
+  public static trackError(errorType: string, errorMessage: string, context?: any) {
+    this.logger.error('application_error', new Error(errorMessage), {
+      error_type: errorType,
+      context,
+      business_event: 'error',
+    });
+  }
+}
+
+// Alert helper for triggering custom alerts
+export class AlertHelper {
+  private static logger = StructuredLogger.getInstance();
+
+  public static triggerAlert(alertType: 'critical' | 'warning' | 'info', message: string, metadata?: any) {
+    const severity = alertType === 'critical' ? 'ERROR' : alertType === 'warning' ? 'WARN' : 'INFO';
+    
+    this.logger.log(severity as any, `ALERT: ${message}`, {
+      alert_type: alertType,
+      alert_triggered: true,
+      ...metadata,
+    });
+  }
+
+  public static checkThresholds() {
+    const metrics = PerformanceMonitor.getMetrics();
+    
+    // Check response time threshold
+    const avgResponseTime = metrics['avg_response_time_ms'];
+    if (avgResponseTime && avgResponseTime > 1000) {
+      this.triggerAlert('warning', `High average response time: ${avgResponseTime}ms`, {
+        metric: 'response_time',
+        value: avgResponseTime,
+        threshold: 1000,
+      });
+    }
+
+    // Check error rate threshold
+    const errorRate = metrics['error_rate'];
+    if (errorRate && errorRate > 0.01) {
+      this.triggerAlert('critical', `High error rate: ${(errorRate * 100).toFixed(2)}%`, {
+        metric: 'error_rate',
+        value: errorRate,
+        threshold: 0.01,
+      });
+    }
+  }
+}
+
+// System resource monitoring
+export class SystemMonitor {
+  public static getMemoryUsage(): number {
+    if (typeof process !== 'undefined' && process.memoryUsage) {
+      const memory = process.memoryUsage();
+      return Math.round((memory.heapUsed / 1024 / 1024) * 100) / 100; // MB
+    }
+    return 0;
+  }
+
+  public static getUptime(): number {
+    if (typeof process !== 'undefined' && process.uptime) {
+      return Math.round(process.uptime());
+    }
+    return 0;
+  }
+
+  public static getCPUUsage(): Promise<number> {
+    return new Promise((resolve) => {
+      if (typeof process !== 'undefined' && process.cpuUsage) {
+        const startUsage = process.cpuUsage();
+        setTimeout(() => {
+          const currentUsage = process.cpuUsage(startUsage);
+          const totalUsage = currentUsage.user + currentUsage.system;
+          const percentage = (totalUsage / 1000000 / 100) * 100; // Convert to percentage
+          resolve(Math.round(percentage * 100) / 100);
+        }, 100);
+      } else {
+        resolve(0);
+      }
+    });
+  }
+}
+
+// Exports are already handled individually above

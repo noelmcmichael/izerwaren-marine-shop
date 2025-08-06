@@ -1,0 +1,12 @@
+{
+  "build_time": "2025-08-04T10:55:59.494302",
+  "build_type": "final-bug-fixes",
+  "fixes": [
+    "Fixed double API path issue in product detail page",
+    "Fixed category dropdown data structure mismatch",
+    "Updated production environment variable NEXT_PUBLIC_API_URL",
+    "Fixed API path logic in CategoryFilter and FilterSidebar"
+  ],
+  "environment": "production",
+  "shopify_store": "izerw-marine.myshopify.com"
+}

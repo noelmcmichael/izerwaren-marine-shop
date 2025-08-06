@@ -1,0 +1,14 @@
+{
+  "timestamp": "20250804-191204",
+  "environment": "local",
+  "baseUrl": "http://localhost:3000",
+  "testType": "smoke",
+  "overallResult": "FAILED",
+  "exitCode": 127,
+  "resultsDirectory": "/Users/noelmcmichael/Workspace/izerwaren_revamp_2_0/apps/frontend/test-results",
+  "reportPaths": {
+    "html": "/Users/noelmcmichael/Workspace/izerwaren_revamp_2_0/apps/frontend/test-results/html-report/index.html",
+    "json": "/Users/noelmcmichael/Workspace/izerwaren_revamp_2_0/apps/frontend/test-results/results.json",
+    "junit": "/Users/noelmcmichael/Workspace/izerwaren_revamp_2_0/apps/frontend/test-results/results.xml"
+  }
+}

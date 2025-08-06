@@ -1,0 +1,293 @@
+import { config } from '../lib/config';
+/**
+ * Shopify Storefront API Service
+ * 
+ * Client-side service for interacting with Shopify Storefront API
+ * Handles product fetching, cart management, and checkout
+ */
+
+import ShopifyBuy from 'shopify-buy';
+
+// Environment variables
+// Using centralized config for Shopify domain
+// Using centralized config for Shopify token
+
+interface ShopifyConfig {
+  isConfigured: boolean;
+  domain: string;
+  hasToken: boolean;
+}
+
+interface CartItem {
+  variantId: string;
+  quantity: number;
+  productTitle: string;
+  variantTitle: string;
+  price: string;
+  sku: string;
+  image?: string;
+}
+
+interface Cart {
+  id: string;
+  items: CartItem[];
+  subtotal: string;
+  totalQuantity: number;
+  checkoutUrl: string;
+}
+
+class ShopifyService {
+  private client: ShopifyBuy.Client | null = null;
+  private cart: ShopifyBuy.Cart | null = null;
+  private isInitialized = false;
+
+  constructor() {
+    // Only initialize on client side
+    if (typeof window !== 'undefined') {
+      this.initializeClient();
+    }
+  }
+
+  private initializeClient() {
+    try {
+      if (!config.shopify.storeDomain || !STOREFRONT_ACCESS_TOKEN) {
+        console.warn('Shopify Storefront API credentials not configured');
+        return;
+      }
+
+      if (STOREFRONT_ACCESS_TOKEN === 'dev-storefront-token') {
+        console.warn('Using placeholder Storefront API token - checkout will not work');
+        return;
+      }
+
+      this.client = ShopifyBuy.buildClient({
+        domain: config.shopify.storeDomain,
+        storefrontAccessToken: STOREFRONT_ACCESS_TOKEN,
+      });
+
+      this.isInitialized = true;
+      // Shopify Storefront API client initialized successfully
+    } catch (error) {
+      console.error('Failed to initialize Shopify client:', error);
+      this.isInitialized = false;
+    }
+  }
+
+  getConfiguration(): ShopifyConfig {
+    // Return safe config during SSR
+    if (typeof window === 'undefined') {
+      return {
+        isConfigured: false,
+        domain: 'ssr-mode',
+        hasToken: false,
+      };
+    }
+    
+    return {
+      isConfigured: this.isInitialized,
+      domain: config.shopify.storeDomain || 'not-configured',
+      hasToken: !!STOREFRONT_ACCESS_TOKEN && STOREFRONT_ACCESS_TOKEN !== 'dev-storefront-token',
+    };
+  }
+
+  async getProducts(limit = 20): Promise<ShopifyBuy.Product[]> {
+    if (!this.client) {
+      throw new Error('Shopify client not initialized');
+    }
+
+    try {
+      const products = await this.client.product.fetchAll(limit);
+      return products;
+    } catch (error) {
+      console.error('Failed to fetch products from Shopify:', error);
+      throw error;
+    }
+  }
+
+  async getProduct(handle: string): Promise<ShopifyBuy.Product | null> {
+    if (!this.client) {
+      throw new Error('Shopify client not initialized');
+    }
+
+    try {
+      const product = await this.client.product.fetchByHandle(handle);
+      return product;
+    } catch (error) {
+      console.error(`Failed to fetch product ${handle}:`, error);
+      return null;
+    }
+  }
+
+  async getProductBySku(sku: string): Promise<ShopifyBuy.Product | null> {
+    if (!this.client) {
+      throw new Error('Shopify client not initialized');
+    }
+
+    try {
+      // We'll need to search for product by SKU in the variant
+      const products = await this.client.product.fetchAll(250);
+      
+      for (const product of products) {
+        for (const variant of product.variants) {
+          if (variant.sku === sku) {
+            return product;
+          }
+        }
+      }
+      
+      return null;
+    } catch (error) {
+      console.error(`Failed to fetch product with SKU ${sku}:`, error);
+      return null;
+    }
+  }
+
+  async createCart(): Promise<ShopifyBuy.Cart> {
+    if (!this.client) {
+      throw new Error('Shopify client not initialized');
+    }
+
+    try {
+      this.cart = await this.client.checkout.create();
+      this.saveCartToStorage(this.cart.id);
+      return this.cart;
+    } catch (error) {
+      console.error('Failed to create cart:', error);
+      throw error;
+    }
+  }
+
+  async getCart(): Promise<Cart | null> {
+    // Return null during SSR
+    if (typeof window === 'undefined') {
+      return null;
+    }
+    
+    if (!this.cart) {
+      await this.loadCartFromStorage();
+    }
+
+    if (!this.cart) {
+      return null;
+    }
+
+    return this.formatCart(this.cart);
+  }
+
+  async addToCart(variantId: string, quantity = 1): Promise<Cart> {
+    if (!this.client) {
+      throw new Error('Shopify client not initialized');
+    }
+
+    if (!this.cart) {
+      await this.createCart();
+    }
+
+    if (!this.cart) {
+      throw new Error('Failed to create cart');
+    }
+
+    try {
+      const lineItemsToAdd = [{
+        variantId,
+        quantity,
+      }];
+
+      this.cart = await this.client.checkout.addLineItems(this.cart.id, lineItemsToAdd);
+      return this.formatCart(this.cart);
+    } catch (error) {
+      console.error('Failed to add item to cart:', error);
+      throw error;
+    }
+  }
+
+  async updateCartItem(lineItemId: string, quantity: number): Promise<Cart> {
+    if (!this.client || !this.cart) {
+      throw new Error('Shopify client or cart not available');
+    }
+
+    try {
+      const lineItemsToUpdate = [{
+        id: lineItemId,
+        quantity,
+      }];
+
+      this.cart = await this.client.checkout.updateLineItems(this.cart.id, lineItemsToUpdate);
+      return this.formatCart(this.cart);
+    } catch (error) {
+      console.error('Failed to update cart item:', error);
+      throw error;
+    }
+  }
+
+  async removeFromCart(lineItemId: string): Promise<Cart> {
+    if (!this.client || !this.cart) {
+      throw new Error('Shopify client or cart not available');
+    }
+
+    try {
+      this.cart = await this.client.checkout.removeLineItems(this.cart.id, [lineItemId]);
+      return this.formatCart(this.cart);
+    } catch (error) {
+      console.error('Failed to remove item from cart:', error);
+      throw error;
+    }
+  }
+
+  getCheckoutUrl(): string | null {
+    return this.cart?.webUrl || null;
+  }
+
+  private formatCart(checkout: ShopifyBuy.Cart): Cart {
+    return {
+      id: checkout.id,
+      items: checkout.lineItems.map((item: any) => ({
+        variantId: item.variant.id,
+        quantity: item.quantity,
+        productTitle: item.title,
+        variantTitle: item.variant.title,
+        price: item.variant.price.amount,
+        sku: item.variant.sku,
+        image: item.variant.image?.src,
+      })),
+      subtotal: checkout.subtotalPrice.amount,
+      totalQuantity: checkout.lineItems.reduce((total: number, item: any) => total + item.quantity, 0),
+      checkoutUrl: checkout.webUrl,
+    };
+  }
+
+  private saveCartToStorage(cartId: string) {
+    try {
+      localStorage.setItem('shopify_cart_id', cartId);
+    } catch (error) {
+      console.warn('Failed to save cart to localStorage:', error);
+    }
+  }
+
+  private async loadCartFromStorage() {
+    if (!this.client) return;
+
+    try {
+      const cartId = localStorage.getItem('shopify_cart_id');
+      if (cartId) {
+        this.cart = await this.client.checkout.fetch(cartId);
+      }
+    } catch (error) {
+      console.warn('Failed to load cart from localStorage:', error);
+      // Clear invalid cart ID
+      localStorage.removeItem('shopify_cart_id');
+    }
+  }
+
+  clearCart() {
+    this.cart = null;
+    localStorage.removeItem('shopify_cart_id');
+  }
+}
+
+// Create singleton instance
+export const shopifyService = new ShopifyService();
+export default shopifyService;
+
+// Type exports
+export type { Cart, CartItem, ShopifyConfig };

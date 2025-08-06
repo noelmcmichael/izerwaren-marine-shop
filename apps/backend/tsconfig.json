@@ -1,0 +1,28 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "outDir": "./dist",
+    "noEmit": false,
+    "module": "CommonJS",
+    "target": "ES2020",
+    "moduleResolution": "node",
+    "paths": {
+      "@izerwaren/shared": ["../../packages/shared/src"],
+      "@izerwaren/database": ["../../packages/database/src"],
+      "@izerwaren/shopify-integration": ["../../packages/shopify-integration/src"]
+    }
+  },
+  "include": [
+    "src/**/*",
+    "../../packages/shared/src/**/*",
+    "../../packages/database/src/index.ts",
+    "../../packages/database/src/migrations/**/*"
+  ],
+  "exclude": [
+    "node_modules", 
+    "dist",
+    "../../packages/database/src/repositories/**/*",
+    "../../packages/shopify-integration/**/*"
+  ]
+}

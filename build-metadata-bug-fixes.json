@@ -1,0 +1,11 @@
+{
+  "image_tag": "bug-fixes-20250804-103034",
+  "timestamp": "20250804-103034",
+  "fixes": [
+    "Product routing: URL-safe SKUs for GraphQL products",
+    "Category mapping: Restored 17 owner categories",
+    "Image URLs: Better handling of Shopify CDN URLs"
+  ],
+  "deployment_url": "https://izerwaren.mcmichaelbuild.com",
+  "build_time": "2025-08-04T10:33:19.468120"
+}

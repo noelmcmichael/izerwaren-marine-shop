@@ -1,0 +1,345 @@
+import * as fs from 'fs';
+import * as path from 'path';
+import * as csv from 'csv-parser';
+import * as XLSX from 'xlsx';
+import * as PDFDocument from 'pdfkit';
+import type { CartSummary, CartItem } from '../types/cart';
+import type { AuthenticatedCustomer } from './AuthService';
+
+export interface BulkOrderItem {
+  sku: string;
+  quantity: number;
+  row: number;
+}
+
+export class FileService {
+  
+  // Generate CSV export of cart
+  static async generateCartCSV(cart: CartSummary, customer: AuthenticatedCustomer): Promise<{
+    buffer: Buffer;
+    filename: string;
+    mimeType: string;
+  }> {
+    const headers = [
+      'SKU',
+      'Product Title',
+      'Variant',
+      'Quantity',
+      'Unit Price',
+      'List Price',
+      'Discount %',
+      'Total Price'
+    ];
+
+    const rows = cart.items.map(item => [
+      item.sku,
+      item.title,
+      item.variant_title || '',
+      item.quantity.toString(),
+      `$${item.unit_price.toFixed(2)}`,
+      `$${item.list_price.toFixed(2)}`,
+      `${item.discount_percent.toFixed(1)}%`,
+      `$${item.total_price.toFixed(2)}`
+    ]);
+
+    // Add summary rows
+    rows.push([]);
+    rows.push(['', '', '', '', '', '', 'Subtotal:', `$${cart.subtotal.toFixed(2)}`]);
+    rows.push(['', '', '', '', '', '', 'Discount:', `$${cart.total_discount.toFixed(2)}`]);
+    rows.push(['', '', '', '', '', '', 'Est. Tax:', `$${(cart.estimated_tax || 0).toFixed(2)}`]);
+    rows.push(['', '', '', '', '', '', 'Est. Shipping:', `$${(cart.estimated_shipping || 0).toFixed(2)}`]);
+    rows.push(['', '', '', '', '', '', 'Total:', `$${cart.total_estimated.toFixed(2)}`]);
+
+    const csvContent = [headers, ...rows]
+      .map(row => row.map(cell => `"${cell}"`).join(','))
+      .join('\n');
+
+    const buffer = Buffer.from(csvContent, 'utf-8');
+    const filename = `bulk-order-${customer.profile.company_name.replace(/[^a-zA-Z0-9]/g, '-')}-${new Date().toISOString().split('T')[0]}.csv`;
+
+    return {
+      buffer,
+      filename,
+      mimeType: 'text/csv'
+    };
+  }
+
+  // Generate PDF export of cart
+  static async generateCartPDF(cart: CartSummary, customer: AuthenticatedCustomer): Promise<{
+    buffer: Buffer;
+    filename: string;
+    mimeType: string;
+  }> {
+    return new Promise((resolve, reject) => {
+      try {
+        const doc = new PDFDocument({ margin: 50 });
+        const chunks: Buffer[] = [];
+
+        doc.on('data', chunk => chunks.push(chunk));
+        doc.on('end', () => {
+          const buffer = Buffer.concat(chunks);
+          const filename = `bulk-order-${customer.profile.company_name.replace(/[^a-zA-Z0-9]/g, '-')}-${new Date().toISOString().split('T')[0]}.pdf`;
+          
+          resolve({
+            buffer,
+            filename,
+            mimeType: 'application/pdf'
+          });
+        });
+
+        // Header
+        doc.fontSize(20).text('Bulk Order Summary', { align: 'center' });
+        doc.moveDown();
+
+        // Customer info
+        doc.fontSize(12);
+        doc.text(`Company: ${customer.profile.company_name}`);
+        doc.text(`Contact: ${customer.profile.contact_email}`);
+        doc.text(`Tier: ${customer.profile.tier}`);
+        doc.text(`Date: ${new Date().toLocaleDateString()}`);
+        doc.moveDown();
+
+        // Table headers
+        const tableTop = doc.y;
+        const itemCodeX = 50;
+        const descriptionX = 120;
+        const quantityX = 350;
+        const priceX = 400;
+        const totalX = 480;
+
+        doc.text('SKU', itemCodeX, tableTop);
+        doc.text('Description', descriptionX, tableTop);
+        doc.text('Qty', quantityX, tableTop);
+        doc.text('Price', priceX, tableTop);
+        doc.text('Total', totalX, tableTop);
+
+        // Draw line under headers
+        doc.moveTo(itemCodeX, tableTop + 15)
+           .lineTo(totalX + 50, tableTop + 15)
+           .stroke();
+
+        // Items
+        let position = tableTop + 30;
+        cart.items.forEach(item => {
+          if (position > 700) {
+            doc.addPage();
+            position = 50;
+          }
+
+          doc.text(item.sku, itemCodeX, position);
+          doc.text(item.title.substring(0, 30), descriptionX, position);
+          doc.text(item.quantity.toString(), quantityX, position);
+          doc.text(`$${item.unit_price.toFixed(2)}`, priceX, position);
+          doc.text(`$${item.total_price.toFixed(2)}`, totalX, position);
+          
+          position += 20;
+        });
+
+        // Summary
+        position += 20;
+        doc.moveTo(itemCodeX, position)
+           .lineTo(totalX + 50, position)
+           .stroke();
+        
+        position += 20;
+        doc.text('Subtotal:', priceX, position);
+        doc.text(`$${cart.subtotal.toFixed(2)}`, totalX, position);
+        
+        position += 15;
+        doc.text('Discount:', priceX, position);
+        doc.text(`$${cart.total_discount.toFixed(2)}`, totalX, position);
+        
+        position += 15;
+        doc.text('Est. Tax:', priceX, position);
+        doc.text(`$${(cart.estimated_tax || 0).toFixed(2)}`, totalX, position);
+        
+        position += 15;
+        doc.text('Est. Shipping:', priceX, position);
+        doc.text(`$${(cart.estimated_shipping || 0).toFixed(2)}`, totalX, position);
+        
+        position += 20;
+        doc.fontSize(14).text('Total:', priceX, position);
+        doc.text(`$${cart.total_estimated.toFixed(2)}`, totalX, position);
+
+        doc.end();
+      } catch (error) {
+        reject(error);
+      }
+    });
+  }
+
+  // Parse bulk order file (CSV or Excel)
+  static async parseBulkOrderFile(file: Express.Multer.File): Promise<BulkOrderItem[]> {
+    const filePath = file.path;
+    const fileExtension = path.extname(file.originalname).toLowerCase();
+
+    try {
+      if (fileExtension === '.csv') {
+        return this.parseCSVFile(filePath);
+      } else if (fileExtension === '.xlsx' || fileExtension === '.xls') {
+        return this.parseExcelFile(filePath);
+      } else {
+        throw new Error('Unsupported file format. Please use CSV or Excel files.');
+      }
+    } catch (error) {
+      throw new Error(`Failed to parse file: ${error.message}`);
+    }
+  }
+
+  // Parse CSV file
+  private static async parseCSVFile(filePath: string): Promise<BulkOrderItem[]> {
+    return new Promise((resolve, reject) => {
+      const items: BulkOrderItem[] = [];
+      let rowNumber = 1;
+
+      fs.createReadStream(filePath)
+        .pipe(csv())
+        .on('data', (row) => {
+          rowNumber++;
+          
+          try {
+            const sku = row.SKU || row.sku || row['Part Number'] || row['part_number'];
+            const quantity = parseInt(row.Quantity || row.quantity || row.Qty || row.qty);
+
+            if (!sku || !quantity || isNaN(quantity)) {
+              throw new Error(`Invalid data in row ${rowNumber}: SKU and Quantity are required`);
+            }
+
+            if (quantity <= 0) {
+              throw new Error(`Invalid quantity in row ${rowNumber}: Must be greater than 0`);
+            }
+
+            items.push({
+              sku: sku.toString().trim(),
+              quantity,
+              row: rowNumber
+            });
+          } catch (error) {
+            reject(new Error(`Row ${rowNumber}: ${error.message}`));
+            return;
+          }
+        })
+        .on('end', () => {
+          if (items.length === 0) {
+            reject(new Error('No valid items found in file'));
+            return;
+          }
+          resolve(items);
+        })
+        .on('error', (error) => {
+          reject(error);
+        });
+    });
+  }
+
+  // Parse Excel file
+  private static async parseExcelFile(filePath: string): Promise<BulkOrderItem[]> {
+    try {
+      const workbook = XLSX.readFile(filePath);
+      const sheetName = workbook.SheetNames[0];
+      const worksheet = workbook.Sheets[sheetName];
+      const jsonData = XLSX.utils.sheet_to_json(worksheet);
+
+      const items: BulkOrderItem[] = [];
+
+      jsonData.forEach((row: any, index) => {
+        const rowNumber = index + 2; // Account for header row
+
+        try {
+          const sku = row.SKU || row.sku || row['Part Number'] || row['part_number'];
+          const quantity = parseInt(row.Quantity || row.quantity || row.Qty || row.qty);
+
+          if (!sku || !quantity || isNaN(quantity)) {
+            throw new Error(`Invalid data in row ${rowNumber}: SKU and Quantity are required`);
+          }
+
+          if (quantity <= 0) {
+            throw new Error(`Invalid quantity in row ${rowNumber}: Must be greater than 0`);
+          }
+
+          items.push({
+            sku: sku.toString().trim(),
+            quantity,
+            row: rowNumber
+          });
+        } catch (error) {
+          throw new Error(`Row ${rowNumber}: ${error.message}`);
+        }
+      });
+
+      if (items.length === 0) {
+        throw new Error('No valid items found in file');
+      }
+
+      return items;
+    } catch (error) {
+      throw new Error(`Failed to parse Excel file: ${error.message}`);
+    }
+  }
+
+  // Generate sample bulk order template
+  static generateBulkOrderTemplate(format: 'csv' | 'xlsx'): {
+    buffer: Buffer;
+    filename: string;
+    mimeType: string;
+  } {
+    const sampleData = [
+      { SKU: 'ABC123', Quantity: 10 },
+      { SKU: 'DEF456', Quantity: 5 },
+      { SKU: 'GHI789', Quantity: 20 }
+    ];
+
+    if (format === 'csv') {
+      const headers = ['SKU', 'Quantity'];
+      const rows = sampleData.map(item => [item.SKU, item.Quantity.toString()]);
+      
+      const csvContent = [headers, ...rows]
+        .map(row => row.map(cell => `"${cell}"`).join(','))
+        .join('\n');
+
+      return {
+        buffer: Buffer.from(csvContent, 'utf-8'),
+        filename: 'bulk-order-template.csv',
+        mimeType: 'text/csv'
+      };
+    } else {
+      const ws = XLSX.utils.json_to_sheet(sampleData);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Bulk Order');
+      
+      const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+
+      return {
+        buffer,
+        filename: 'bulk-order-template.xlsx',
+        mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+      };
+    }
+  }
+
+  // Clean up uploaded files
+  static cleanup(filePath: string): void {
+    try {
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
+    } catch (error) {
+      console.warn('Failed to clean up file:', filePath, error);
+    }
+  }
+
+  // Validate file size and type
+  static validateUploadFile(file: Express.Multer.File): void {
+    const maxSize = 10 * 1024 * 1024; // 10MB
+    const allowedTypes = ['.csv', '.xlsx', '.xls'];
+    const fileExtension = path.extname(file.originalname).toLowerCase();
+
+    if (file.size > maxSize) {
+      throw new Error('File size too large. Maximum 10MB allowed.');
+    }
+
+    if (!allowedTypes.includes(fileExtension)) {
+      throw new Error('Invalid file type. Only CSV and Excel files are allowed.');
+    }
+  }
+}

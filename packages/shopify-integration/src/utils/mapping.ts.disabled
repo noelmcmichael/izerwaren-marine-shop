@@ -1,0 +1,361 @@
+import type { Product, ProductVariant, ProductImage, TechnicalSpecification } from '@izerwaren/database';
+import type { ShopifyProduct, ShopifyVariant, ShopifyImage } from '../types/shopify';
+
+/**
+ * Maps local product data to Shopify product format
+ */
+export function mapProductToShopify(
+  product: Product & {
+    variants?: ProductVariant[];
+    images?: ProductImage[];
+    specifications?: TechnicalSpecification[];
+  }
+): Partial<ShopifyProduct> {
+  // Generate tags from specifications and product metadata
+  const tags = generateProductTags(product);
+  
+  // Create product handle from title if not exists
+  const handle = product.handle || generateHandle(product.title);
+  
+  return {
+    title: product.title,
+    handle: handle,
+    descriptionHtml: product.description || '',
+    vendor: product.vendor || 'Izerwaren',
+    productType: product.categoryName || 'Hardware',
+    tags: tags,
+    status: product.status === 'active' ? 'ACTIVE' : 'DRAFT',
+  };
+}
+
+/**
+ * Maps local variant data to Shopify variant format
+ */
+export function mapVariantToShopify(
+  variant: ProductVariant,
+  product: Product
+): Partial<ShopifyVariant> {
+  return {
+    title: variant.title || 'Default Title',
+    price: variant.price.toString(),
+    sku: variant.sku || product.sku || '',
+    compareAtPrice: variant.compareAtPrice?.toString(),
+    inventoryQuantity: variant.inventoryQty,
+    weight: variant.weight?.toNumber() || 0,
+    weightUnit: variant.weightUnit || 'g',
+  };
+}
+
+/**
+ * Maps local image data to Shopify image format
+ */
+export function mapImageToShopify(
+  image: ProductImage,
+  position: number
+): Partial<ShopifyImage> {
+  return {
+    alt: `${image.product?.title || 'Product'} image ${position}`,
+    position: position,
+  };
+}
+
+/**
+ * Generates SEO-friendly handle from product title
+ */
+export function generateHandle(title: string): string {
+  return title
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9\s-]/g, '') // Remove special characters
+    .replace(/\s+/g, '-') // Replace spaces with hyphens
+    .replace(/-+/g, '-') // Replace multiple hyphens with single
+    .replace(/^-|-$/g, ''); // Remove leading/trailing hyphens
+}
+
+/**
+ * Generates product tags from specifications and metadata
+ */
+export function generateProductTags(
+  product: Product & {
+    specifications?: TechnicalSpecification[];
+  }
+): string[] {
+  const tags: string[] = [];
+  
+  // Add category tag
+  if (product.categoryName) {
+    tags.push(product.categoryName);
+  }
+  
+  // Add vendor tag
+  if (product.vendor) {
+    tags.push(product.vendor);
+  }
+  
+  // Add specification-based tags
+  if (product.specifications) {
+    for (const spec of product.specifications) {
+      if (spec.isSearchable && spec.category) {
+        // Add category tags
+        tags.push(spec.category);
+        
+        // Add specific value tags for important categories
+        if (['material', 'finish', 'type', 'style'].includes(spec.category.toLowerCase())) {
+          tags.push(`${spec.category}: ${spec.value}`);
+        }
+      }
+    }
+  }
+  
+  // Add B2B tag
+  tags.push('B2B');
+  
+  // Remove duplicates and return
+  return Array.from(new Set(tags.filter(Boolean)));
+}
+
+/**
+ * Validates SKU uniqueness and format
+ */
+export function validateSku(sku: string, existingSkus: Set<string>): {
+  isValid: boolean;
+  errors: string[];
+  suggestedSku?: string;
+} {
+  const errors: string[] = [];
+  
+  if (!sku) {
+    errors.push('SKU is required');
+    return { isValid: false, errors };
+  }
+  
+  if (sku.length > 100) {
+    errors.push('SKU must be 100 characters or less');
+  }
+  
+  if (!/^[a-zA-Z0-9\-_]+$/.test(sku)) {
+    errors.push('SKU can only contain letters, numbers, hyphens, and underscores');
+  }
+  
+  if (existingSkus.has(sku)) {
+    errors.push('SKU already exists');
+    
+    // Generate suggested SKU
+    let counter = 1;
+    let suggestedSku: string;
+    do {
+      suggestedSku = `${sku}-${counter}`;
+      counter++;
+    } while (existingSkus.has(suggestedSku) && counter < 100);
+    
+    return {
+      isValid: false,
+      errors,
+      suggestedSku: counter < 100 ? suggestedSku : undefined,
+    };
+  }
+  
+  return { isValid: errors.length === 0, errors };
+}
+
+/**
+ * Maps Shopify response back to local database format
+ */
+export function mapShopifyProductToLocal(
+  shopifyProduct: ShopifyProduct,
+  _localProductId: string
+): Partial<Product> {
+  return {
+    shopifyProductId: shopifyProduct.id,
+    title: shopifyProduct.title,
+    handle: shopifyProduct.handle,
+    description: shopifyProduct.description,
+    vendor: shopifyProduct.vendor,
+    status: shopifyProduct.status,
+    tags: shopifyProduct.tags,
+  };
+}
+
+/**
+ * Maps Shopify variant response back to local database format
+ */
+export function mapShopifyVariantToLocal(
+  shopifyVariant: ShopifyVariant,
+  _localVariantId: string
+): Partial<ProductVariant> {
+  return {
+    shopifyVariantId: shopifyVariant.id,
+    title: shopifyVariant.title,
+    price: parseFloat(shopifyVariant.price),
+    compareAtPrice: shopifyVariant.compare_at_price ? 
+      parseFloat(shopifyVariant.compare_at_price) : null,
+    inventoryQty: shopifyVariant.inventory_quantity,
+    weight: shopifyVariant.weight,
+    weightUnit: shopifyVariant.weight_unit,
+  };
+}
+
+/**
+ * Creates variant options for Shopify from product specifications
+ */
+export function createVariantOptions(
+  specifications: TechnicalSpecification[]
+): { name: string; values: string[] }[] {
+  const optionGroups = new Map<string, Set<string>>();
+  
+  // Group specifications by category to create options
+  for (const spec of specifications) {
+    if (spec.isSearchable && shouldCreateOption(spec.category)) {
+      if (!optionGroups.has(spec.category)) {
+        optionGroups.set(spec.category, new Set());
+      }
+      optionGroups.get(spec.category)!.add(spec.value);
+    }
+  }
+  
+  // Convert to Shopify option format
+  const options: { name: string; values: string[] }[] = [];
+  
+  for (const [category, values] of optionGroups) {
+    if (values.size > 1 && values.size <= 100) { // Shopify limit
+      options.push({
+        name: formatOptionName(category),
+        values: Array.from(values).sort(),
+      });
+    }
+  }
+  
+  // Limit to 3 options (Shopify limit)
+  return options.slice(0, 3);
+}
+
+/**
+ * Determines if a specification category should become a variant option
+ */
+function shouldCreateOption(category: string): boolean {
+  const variantCategories = [
+    'size',
+    'color',
+    'material',
+    'finish',
+    'length',
+    'width',
+    'height',
+    'dimension',
+  ];
+  
+  return variantCategories.includes(category.toLowerCase());
+}
+
+/**
+ * Formats option name for display
+ */
+function formatOptionName(category: string): string {
+  return category
+    .split(/[-_\s]+/)
+    .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+    .join(' ');
+}
+
+/**
+ * Calculates product weight from specifications
+ */
+export function calculateProductWeight(
+  specifications: TechnicalSpecification[]
+): { weight: number; unit: string } {
+  const weightSpec = specifications.find(spec => 
+    spec.category.toLowerCase() === 'weight' ||
+    spec.name.toLowerCase().includes('weight')
+  );
+  
+  if (weightSpec) {
+    const weight = parseFloat(weightSpec.value);
+    const unit = weightSpec.unit || 'g';
+    
+    if (!isNaN(weight)) {
+      return { weight, unit };
+    }
+  }
+  
+  // Default weight estimation based on category
+  return { weight: 100, unit: 'g' };
+}
+
+/**
+ * Generates product description from specifications
+ */
+export function generateProductDescription(
+  product: Product & { specifications?: TechnicalSpecification[] }
+): string {
+  let description = product.description || '';
+  
+  if (product.specifications && product.specifications.length > 0) {
+    const importantSpecs = product.specifications
+      .filter(spec => 
+        spec.isSearchable && 
+        ['dimension', 'material', 'finish', 'feature'].includes((spec.category || '').toLowerCase())
+      )
+      .slice(0, 10); // Limit to prevent overly long descriptions
+    
+    if (importantSpecs.length > 0) {
+      if (description) {
+        description += '\n\n';
+      }
+      
+      description += 'Key Features:\n';
+      description += importantSpecs
+        .map(spec => `• ${spec.name}: ${spec.value}${spec.unit ? ` ${spec.unit}` : ''}`)
+        .join('\n');
+    }
+  }
+  
+  return description;
+}
+
+/**
+ * Validates product data before Shopify migration
+ */
+export function validateProductForShopify(
+  product: Product & {
+    variants?: ProductVariant[];
+    images?: ProductImage[];
+  }
+): { isValid: boolean; errors: string[]; warnings: string[] } {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+  
+  // Required fields validation
+  if (!product.title || product.title.trim().length === 0) {
+    errors.push('Product title is required');
+  } else if (product.title.length > 255) {
+    errors.push('Product title must be 255 characters or less');
+  }
+  
+  // Handle validation
+  if (!product.handle) {
+    warnings.push('Product handle missing, will be generated from title');
+  } else if (product.handle.length > 255) {
+    errors.push('Product handle must be 255 characters or less');
+  }
+  
+  // Variants validation
+  if (product.variants && product.variants.length > 100) {
+    errors.push('Product cannot have more than 100 variants');
+  }
+  
+  // Images validation
+  if (product.images && product.images.length > 250) {
+    warnings.push('Product has more than 250 images, some may not be uploaded');
+  }
+  
+  // SKU validation
+  if (product.sku && product.sku.length > 100) {
+    errors.push('Product SKU must be 100 characters or less');
+  }
+  
+  return {
+    isValid: errors.length === 0,
+    errors,
+    warnings,
+  };
+}

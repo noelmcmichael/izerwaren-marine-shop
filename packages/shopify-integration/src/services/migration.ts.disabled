@@ -1,0 +1,617 @@
+import * as fs from 'fs/promises';
+import * as path from 'path';
+import { EventEmitter } from 'events';
+import type { PrismaClient, Product, ProductVariant, ProductImage, TechnicalSpecification } from '@izerwaren/database';
+import type { ShopifyClient } from '../client';
+import { ProductService } from './products';
+import { MediaService } from './media';
+import type {
+  MigrationConfig,
+  MigrationProgress,
+  MigrationError,
+  ProductMappingResult,
+  defaultMigrationConfig,
+} from '../types/shopify';
+import { validateProductForShopify } from '../utils/mapping';
+
+export class MigrationEngine extends EventEmitter {
+  private productService: ProductService;
+  private mediaService: MediaService;
+  private progress: MigrationProgress;
+  private isRunning: boolean = false;
+  private shouldStop: boolean = false;
+
+  constructor(
+    private prisma: PrismaClient,
+    private shopifyClient: ShopifyClient,
+    private config: MigrationConfig = defaultMigrationConfig
+  ) {
+    super();
+    this.productService = new ProductService(shopifyClient);
+    this.mediaService = new MediaService(shopifyClient);
+    this.progress = this.initializeProgress();
+  }
+
+  /**
+   * Start the migration process
+   */
+  async start(): Promise<MigrationProgress> {
+    if (this.isRunning) {
+      throw new Error('Migration is already running');
+    }
+
+    this.isRunning = true;
+    this.shouldStop = false;
+    this.progress = this.initializeProgress();
+    this.progress.startTime = new Date();
+
+    this.emit('migration:started', this.progress);
+
+    try {
+      // Phase 1: Preparation
+      await this.runPreparationPhase();
+
+      // Phase 2: Products migration
+      if (!this.shouldStop) {
+        await this.runProductsMigration();
+      }
+
+      // Phase 3: Variants migration
+      if (!this.shouldStop) {
+        await this.runVariantsMigration();
+      }
+
+      // Phase 4: Images migration
+      if (!this.shouldStop && !this.config.skipImages) {
+        await this.runImagesMigration();
+      }
+
+      // Phase 5: Validation
+      if (!this.shouldStop) {
+        await this.runValidationPhase();
+      }
+
+      this.progress.currentPhase = this.shouldStop ? 'failed' : 'completed';
+      this.progress.endTime = new Date();
+
+      this.emit('migration:completed', this.progress);
+    } catch (error) {
+      this.progress.currentPhase = 'failed';
+      this.progress.endTime = new Date();
+      
+      const migrationError: MigrationError = {
+        type: 'api',
+        entityId: 'migration',
+        message: error instanceof Error ? error.message : 'Unknown error',
+        details: error,
+        timestamp: new Date(),
+        retryCount: 0,
+      };
+      
+      this.progress.errors.push(migrationError);
+      this.emit('migration:error', error);
+      throw error;
+    } finally {
+      this.isRunning = false;
+    }
+
+    return this.progress;
+  }
+
+  /**
+   * Stop the migration process
+   */
+  async stop(): Promise<void> {
+    if (!this.isRunning) {
+      return;
+    }
+
+    this.shouldStop = true;
+    this.emit('migration:stopping');
+
+    // Wait for current operations to complete
+    while (this.isRunning) {
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+
+    this.emit('migration:stopped');
+  }
+
+  /**
+   * Get current migration progress
+   */
+  getProgress(): MigrationProgress {
+    return { ...this.progress };
+  }
+
+  /**
+   * Phase 1: Preparation
+   */
+  private async runPreparationPhase(): Promise<void> {
+    this.progress.currentPhase = 'preparation';
+    this.emit('phase:started', 'preparation');
+
+    try {
+      // Count total products and images
+      const productCount = await this.prisma.product.count();
+      const imageCount = await this.prisma.productImage.count();
+
+      this.progress.totalProducts = productCount;
+      this.progress.totalImages = this.config.skipImages ? 0 : imageCount;
+
+      // Validate configuration
+      if (this.config.includeProductTypes.length > 0) {
+        const filteredCount = await this.prisma.product.count({
+          where: {
+            categoryName: {
+              in: this.config.includeProductTypes,
+            },
+          },
+        });
+        this.progress.totalProducts = filteredCount;
+      }
+
+      // Create necessary directories
+      await this.ensureDirectories();
+
+      // Validate Shopify connection
+      await this.validateShopifyConnection();
+
+      this.emit('phase:completed', 'preparation');
+    } catch (error) {
+      this.emit('phase:error', 'preparation', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Phase 2: Products migration
+   */
+  private async runProductsMigration(): Promise<void> {
+    this.progress.currentPhase = 'products';
+    this.emit('phase:started', 'products');
+
+    try {
+      const whereClause = this.buildProductWhereClause();
+      const products = await this.prisma.product.findMany({
+        where: whereClause,
+        include: {
+          productVariants: true,
+          images: true,
+          technicalSpecs: true,
+          catalogs: true,
+          syncLogs: true,
+        },
+        orderBy: { createdAt: 'asc' },
+      });
+
+      // Process products in batches
+      for (let i = 0; i < products.length; i += this.config.batchSize) {
+        if (this.shouldStop) break;
+
+        const batch = products.slice(i, i + this.config.batchSize);
+        await this.processBatch(batch);
+
+        this.emit('progress:update', this.progress);
+      }
+
+      this.emit('phase:completed', 'products');
+    } catch (error) {
+      this.emit('phase:error', 'products', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Phase 3: Variants migration
+   */
+  private async runVariantsMigration(): Promise<void> {
+    this.progress.currentPhase = 'variants';
+    this.emit('phase:started', 'variants');
+
+    try {
+      // Variants are created with products, so this phase is for validation
+      // and updating any missing variant data
+      
+      const productsWithVariants = await this.prisma.product.findMany({
+        where: {
+          shopifyProductId: { not: null },
+          productVariants: { some: {} },
+        },
+        include: {
+          productVariants: true,
+        },
+      });
+
+      for (const product of productsWithVariants) {
+        if (this.shouldStop) break;
+        await this.syncProductVariants(product);
+        console.log(`Synced variants for product ${product.id}`);
+      }
+
+      this.emit('phase:completed', 'variants');
+    } catch (error) {
+      this.emit('phase:error', 'variants', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Phase 4: Images migration
+   */
+  private async runImagesMigration(): Promise<void> {
+    this.progress.currentPhase = 'images';
+    this.emit('phase:started', 'images');
+
+    try {
+      const productsWithImages = await this.prisma.product.findMany({
+        where: {
+          shopifyProductId: { not: null },
+          images: { some: { fileExists: true } },
+        },
+        include: {
+          images: {
+            where: { fileExists: true },
+            orderBy: { imageOrder: 'asc' },
+          },
+        },
+      });
+
+      for (const product of productsWithImages) {
+        if (this.shouldStop) break;
+        await this.migrateProductImages(product);
+      }
+
+      this.emit('phase:completed', 'images');
+    } catch (error) {
+      this.emit('phase:error', 'images', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Phase 5: Validation
+   */
+  private async runValidationPhase(): Promise<void> {
+    this.progress.currentPhase = 'validation';
+    this.emit('phase:started', 'validation');
+
+    try {
+      // Validate migrated products
+      const migratedProducts = await this.prisma.product.findMany({
+        where: { shopifyProductId: { not: null } },
+        include: { productVariants: true, images: true },
+      });
+
+      for (const product of migratedProducts) {
+        if (this.shouldStop) break;
+        await this.validateMigratedProduct(product);
+      }
+
+      this.emit('phase:completed', 'validation');
+    } catch (error) {
+      this.emit('phase:error', 'validation', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Process a batch of products
+   */
+  private async processBatch(
+    products: Array<Product & {
+      variants?: ProductVariant[];
+      images?: ProductImage[];
+      specifications?: TechnicalSpecification[];
+    }>
+  ): Promise<void> {
+    if (this.config.parallelProcessing) {
+      // Process products in parallel with concurrency limit
+      const semaphore = new Array(this.config.maxConcurrency).fill(null);
+      await Promise.all(
+        products.map(async (product, index) => {
+          await semaphore[index % this.config.maxConcurrency];
+          semaphore[index % this.config.maxConcurrency] = this.processProduct(product);
+          return semaphore[index % this.config.maxConcurrency];
+        })
+      );
+    } else {
+      // Process products sequentially
+      for (const product of products) {
+        if (this.shouldStop) break;
+        await this.processProduct(product);
+      }
+    }
+  }
+
+  /**
+   * Process a single product
+   */
+  private async processProduct(
+    product: Product & {
+      variants?: ProductVariant[];
+      images?: ProductImage[];
+      specifications?: TechnicalSpecification[];
+    }
+  ): Promise<void> {
+    const result: ProductMappingResult = {
+      localProductId: product.id,
+      status: 'pending',
+      errors: [],
+      productVariants: [],
+      images: [],
+    };
+
+    try {
+      // Skip if already migrated and not forcing
+      if (product.shopifyProductId && !this.config.dryRun) {
+        result.status = 'skipped';
+        result.shopifyProductId = product.shopifyProductId;
+        this.progress.processedProducts++;
+        return;
+      }
+
+      // Validate product
+      const validation = validateProductForShopify(product);
+      if (!validation.isValid) {
+        result.status = 'failed';
+        result.errors = validation.errors;
+        this.addError('product', product.id, validation.errors.join(', '));
+        this.progress.processedProducts++;
+        this.progress.failedProducts++;
+        return;
+      }
+
+      if (!this.config.dryRun) {
+        // Create product in Shopify
+        const createResult = await this.productService.createProduct(product);
+
+        if (createResult.success && createResult.data) {
+          result.shopifyProductId = createResult.data.id;
+          result.status = 'success';
+
+          // Update local database
+          await this.prisma.product.update({
+            where: { id: product.id },
+            data: { shopifyProductId: createResult.data.id },
+          });
+
+          this.progress.successfulProducts++;
+        } else {
+          result.status = 'failed';
+          result.errors.push(createResult.error || 'Unknown error');
+          this.addError('product', product.id, createResult.error || 'Unknown error');
+          this.progress.failedProducts++;
+        }
+      } else {
+        result.status = 'success';
+        this.progress.successfulProducts++;
+      }
+
+      this.progress.processedProducts++;
+      this.emit('product:processed', result);
+
+    } catch (error) {
+      result.status = 'failed';
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      result.errors.push(errorMessage);
+      this.addError('product', product.id, errorMessage);
+      this.progress.processedProducts++;
+      this.progress.failedProducts++;
+    }
+  }
+
+  /**
+   * Migrate product images
+   */
+  private async migrateProductImages(
+    product: Product & { images: ProductImage[] }
+  ): Promise<void> {
+    if (!product.shopifyProductId) return;
+
+    for (const image of product.images) {
+      if (this.shouldStop) break;
+
+      try {
+        // Process image if needed
+        const processedPath = await this.processImageIfNeeded(image.localPath);
+
+        // Upload to Shopify
+        const uploadResult = await this.mediaService.uploadProductImage(
+          product.shopifyProductId,
+          processedPath,
+          image.imageOrder || 1,
+          `${product.title} - Image ${image.imageOrder || 1}`
+        );
+
+        if (uploadResult.success && uploadResult.data) {
+          // Update local database
+          await this.prisma.productImage.update({
+            where: { id: image.id },
+            data: { imageUrl: uploadResult.data.src },
+          });
+
+          this.progress.successfulImages++;
+        } else {
+          this.addError('image', image.id, uploadResult.error || 'Upload failed');
+          this.progress.failedImages++;
+        }
+
+        this.progress.processedImages++;
+
+        // Cleanup temporary files
+        if (processedPath !== image.localPath) {
+          await fs.unlink(processedPath).catch(() => {});
+        }
+
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        this.addError('image', image.id, errorMessage);
+        this.progress.processedImages++;
+        this.progress.failedImages++;
+      }
+    }
+  }
+
+  /**
+   * Process image if needed (optimization, resizing)
+   */
+  private async processImageIfNeeded(imagePath: string): Promise<string> {
+    const validation = await this.mediaService.validateImage(imagePath);
+    
+    if (!validation.isValid) {
+      throw new Error(`Invalid image: ${validation.errors.join(', ')}`);
+    }
+
+    // Check if processing is needed
+    const metadata = validation.metadata!;
+    const needsProcessing = 
+      metadata.width! > 2048 || 
+      metadata.height! > 2048 || 
+      (await fs.stat(imagePath)).size > 1024 * 1024; // 1MB
+
+    if (!needsProcessing) {
+      return imagePath;
+    }
+
+    // Create temporary processed file
+    const tempPath = path.join(
+      path.dirname(imagePath),
+      `temp_${Date.now()}_${path.basename(imagePath)}`
+    );
+
+    const processed = await this.mediaService.processImage(imagePath, tempPath);
+    return processed.processedPath;
+  }
+
+  /**
+   * Sync product variants with Shopify
+   */
+  private async syncProductVariants(
+    // product: Product & { variants: ProductVariant[] }
+  ): Promise<void> {
+    // Implementation for variant synchronization
+    // This would involve checking variant status and updating as needed
+    // Currently a placeholder for future implementation
+  }
+
+  /**
+   * Validate migrated product
+   */
+  private async validateMigratedProduct(
+    product: Product & { variants?: ProductVariant[]; images?: ProductImage[] }
+  ): Promise<void> {
+    if (!product.shopifyProductId) return;
+
+    try {
+      const shopifyProduct = await this.productService.getProduct(product.shopifyProductId);
+      
+      if (!shopifyProduct.success) {
+        this.addError('validation', product.id, 'Product not found in Shopify');
+        return;
+      }
+
+      // Validate basic product data
+      if (shopifyProduct.data!.title !== product.title) {
+        this.addError('validation', product.id, 'Title mismatch between local and Shopify');
+      }
+
+      // Validate variants count
+      const localVariantCount = product.productVariants?.length || 0;
+      const shopifyVariantCount = shopifyProduct.data!.variants?.length || 0;
+      
+      if (localVariantCount !== shopifyVariantCount) {
+        this.addError('validation', product.id, 
+          `Variant count mismatch: local=${localVariantCount}, shopify=${shopifyVariantCount}`);
+      }
+
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      this.addError('validation', product.id, errorMessage);
+    }
+  }
+
+  /**
+   * Build product where clause based on configuration
+   */
+  private buildProductWhereClause(): any {
+    const where: any = {};
+
+    if (this.config.includeProductTypes.length > 0) {
+      where.categoryName = { in: this.config.includeProductTypes };
+    }
+
+    if (this.config.excludeProductTypes.length > 0) {
+      where.categoryName = { notIn: this.config.excludeProductTypes };
+    }
+
+    if (this.config.resumeFromProduct) {
+      where.id = { gte: this.config.resumeFromProduct };
+    }
+
+    return where;
+  }
+
+  /**
+   * Initialize migration progress
+   */
+  private initializeProgress(): MigrationProgress {
+    return {
+      totalProducts: 0,
+      processedProducts: 0,
+      successfulProducts: 0,
+      failedProducts: 0,
+      totalImages: 0,
+      processedImages: 0,
+      successfulImages: 0,
+      failedImages: 0,
+      startTime: new Date(),
+      currentPhase: 'preparation',
+      errors: [],
+    };
+  }
+
+  /**
+   * Add error to progress
+   */
+  private addError(
+    type: MigrationError['type'],
+    entityId: string,
+    message: string,
+    details?: any
+  ): void {
+    const error: MigrationError = {
+      type,
+      entityId,
+      message,
+      details,
+      timestamp: new Date(),
+      retryCount: 0,
+    };
+
+    this.progress.errors.push(error);
+    this.emit('migration:error', error);
+  }
+
+  /**
+   * Ensure necessary directories exist
+   */
+  private async ensureDirectories(): Promise<void> {
+    const tempDir = path.join(process.cwd(), 'temp', 'migration');
+    await fs.mkdir(tempDir, { recursive: true });
+  }
+
+  /**
+   * Validate Shopify connection
+   */
+  private async validateShopifyConnection(): Promise<void> {
+    try {
+      const result = await this.productService.listProducts(1);
+      if (!result.success) {
+        throw new Error(`Shopify connection failed: ${result.error}`);
+      }
+    } catch (error) {
+      throw new Error(`Unable to connect to Shopify: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+}

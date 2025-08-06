@@ -1,0 +1,325 @@
+'use client';
+
+// Force dynamic rendering for test pages
+export const dynamic = 'force-dynamic';
+
+import { config } from '@/lib/config';
+import React, { useState } from 'react';
+import { useCustomerAuth } from '../../providers/CustomerAuthProvider';
+import { PricingDisplay } from '../../components/product/PricingDisplay';
+
+/**
+ * Pro Account Authentication and Pricing Test Page
+ * 
+ * Demonstrates:
+ * - Customer authentication status
+ * - Tier-based pricing
+ * - Permission checking
+ * - Pricing display with different scenarios
+ */
+export default function ProAccountTestPage() {
+  const { 
+    customer, 
+    authenticated, 
+    loading, 
+    user,
+    getTierBenefits, 
+    hasPermission,
+    canAccessFeature,
+    signOut 
+  } = useCustomerAuth();
+
+  const [selectedQuantity, setSelectedQuantity] = useState(1);
+
+  // Sample product data for testing
+  const testProduct = {
+    shopifyProductId: 'test-product-123',
+    title: 'Professional Marine Bolt Set',
+    basePrice: 149.99,
+    retailPrice: 199.99,
+  };
+
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
+      </div>
+    );
+  }
+
+  const tierBenefits = getTierBenefits();
+
+  return (
+    <div className="min-h-screen bg-gray-50 py-8">
+      <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8">
+        
+        {/* Header */}
+        <div className="mb-8">
+          <h1 className="text-3xl font-bold text-gray-900 mb-2">
+            Pro Account Authentication & Pricing Test
+          </h1>
+          <p className="text-gray-600">
+            Testing customer tier detection and pricing system integration
+          </p>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+          
+          {/* Authentication Status */}
+          <div className="bg-white rounded-lg shadow p-6">
+            <h2 className="text-xl font-semibold text-gray-900 mb-4">
+              Authentication Status
+            </h2>
+            
+            <div className="space-y-4">
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-medium text-gray-500">Firebase User:</span>
+                <span className={`px-2 py-1 rounded text-xs ${
+                  user ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
+                }`}>
+                  {user ? 'Authenticated' : 'Not Authenticated'}
+                </span>
+              </div>
+              
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-medium text-gray-500">Customer Profile:</span>
+                <span className={`px-2 py-1 rounded text-xs ${
+                  customer?.profile ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
+                }`}>
+                  {customer?.profile ? 'Loaded' : 'Not Loaded'}
+                </span>
+              </div>
+
+              {customer?.profile && (
+                <>
+                  <div className="border-t pt-4">
+                    <div className="space-y-2">
+                      <div>
+                        <span className="text-sm font-medium text-gray-500">Company:</span>
+                        <span className="ml-2 text-gray-900">{customer.profile.company_name}</span>
+                      </div>
+                      <div>
+                        <span className="text-sm font-medium text-gray-500">Email:</span>
+                        <span className="ml-2 text-gray-900">{customer.profile.contact_email}</span>
+                      </div>
+                      <div>
+                        <span className="text-sm font-medium text-gray-500">Tier:</span>
+                        <span className={`ml-2 px-2 py-1 rounded text-xs font-medium ${
+                          customer.profile.tier === 'ENTERPRISE' ? 'bg-purple-100 text-purple-800' :
+                          customer.profile.tier === 'PREMIUM' ? 'bg-blue-100 text-blue-800' :
+                          'bg-green-100 text-green-800'
+                        }`}>
+                          {customer.profile.tier}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </>
+              )}
+
+              {user && (
+                <div className="pt-4 border-t">
+                  <button
+                    onClick={signOut}
+                    className="w-full bg-red-600 text-white py-2 px-4 rounded-md text-sm hover:bg-red-700"
+                  >
+                    Sign Out
+                  </button>
+                </div>
+              )}
+
+              {!user && (
+                <div className="pt-4 border-t">
+                  <p className="text-sm text-gray-600 mb-2">
+                    Development mode: Mock authentication is enabled
+                  </p>
+                  <p className="text-xs text-gray-500">
+                    In production, this would show the actual login form
+                  </p>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Permissions & Benefits */}
+          <div className="bg-white rounded-lg shadow p-6">
+            <h2 className="text-xl font-semibold text-gray-900 mb-4">
+              Permissions & Benefits
+            </h2>
+            
+            <div className="space-y-4">
+              {/* Permissions */}
+              <div>
+                <h3 className="text-sm font-medium text-gray-700 mb-2">Permissions</h3>
+                <div className="grid grid-cols-2 gap-2 text-xs">
+                  {[
+                    'view_pricing',
+                    'request_quotes',
+                    'place_orders',
+                    'view_technical_docs',
+                    'bulk_ordering',
+                    'priority_support',
+                    'custom_pricing',
+                    'api_access'
+                  ].map(permission => (
+                    <div key={permission} className="flex items-center">
+                      <span className={hasPermission(permission) ? 'text-green-600' : 'text-gray-400'}>
+                        {hasPermission(permission) ? '✓' : '✗'}
+                      </span>
+                      <span className="ml-1 text-gray-600">{permission}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Tier Benefits */}
+              <div className="border-t pt-4">
+                <h3 className="text-sm font-medium text-gray-700 mb-2">Tier Benefits</h3>
+                <div className="space-y-2 text-sm">
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">Pricing Discount:</span>
+                    <span className="font-medium text-green-600">{tierBenefits.pricing_discount}%</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">Credit Terms:</span>
+                    <span className={tierBenefits.credit_terms ? 'text-green-600' : 'text-gray-400'}>
+                      {tierBenefits.credit_terms ? 'Yes' : 'No'}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">Priority Support:</span>
+                    <span className={tierBenefits.priority_support ? 'text-green-600' : 'text-gray-400'}>
+                      {tierBenefits.priority_support ? 'Yes' : 'No'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Feature Access */}
+              <div className="border-t pt-4">
+                <h3 className="text-sm font-medium text-gray-700 mb-2">Feature Access</h3>
+                <div className="grid grid-cols-2 gap-2 text-xs">
+                  {[
+                    'bulk_ordering',
+                    'technical_docs',
+                    'priority_support',
+                    'custom_pricing',
+                    'api_access',
+                    'credit_terms'
+                  ].map(feature => (
+                    <div key={feature} className="flex items-center">
+                      <span className={canAccessFeature(feature) ? 'text-green-600' : 'text-gray-400'}>
+                        {canAccessFeature(feature) ? '✓' : '✗'}
+                      </span>
+                      <span className="ml-1 text-gray-600">{feature}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Pricing Test */}
+          <div className="lg:col-span-2 bg-white rounded-lg shadow p-6">
+            <h2 className="text-xl font-semibold text-gray-900 mb-4">
+              Pro Account Pricing Display Test
+            </h2>
+            
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              {/* Product Info */}
+              <div>
+                <h3 className="text-lg font-medium text-gray-900 mb-2">
+                  {testProduct.title}
+                </h3>
+                <p className="text-gray-600 mb-4">
+                  Testing tier-based pricing with quantity selection
+                </p>
+                
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Quantity
+                    </label>
+                    <select
+                      value={selectedQuantity}
+                      onChange={(e) => setSelectedQuantity(Number(e.target.value))}
+                      className="block w-full border border-gray-300 rounded-md px-3 py-2 text-sm"
+                    >
+                      {[1, 5, 10, 25, 50, 100].map(qty => (
+                        <option key={qty} value={qty}>{qty} units</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="text-sm text-gray-600">
+                    <div><strong>Base Price:</strong> ${testProduct.basePrice}</div>
+                    <div><strong>Retail Price:</strong> ${testProduct.retailPrice}</div>
+                    <div><strong>Shopify Product ID:</strong> {testProduct.shopifyProductId}</div>
+                  </div>
+                </div>
+              </div>
+              
+              {/* Pricing Display */}
+              <div>
+                <PricingDisplay
+                  shopifyProductId={testProduct.shopifyProductId}
+                  basePrice={testProduct.basePrice}
+                  retailPrice={testProduct.retailPrice}
+                  quantity={selectedQuantity}
+                  showTierBenefits={true}
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Debug Information */}
+          {config.isDevelopment && (
+            <div className="lg:col-span-2 bg-gray-100 rounded-lg p-6">
+              <h2 className="text-lg font-semibold text-gray-900 mb-4">
+                Debug Information
+              </h2>
+              
+              <div className="space-y-4 text-sm">
+                <div>
+                  <h3 className="font-medium text-gray-700">User Object:</h3>
+                  <pre className="mt-1 text-xs bg-white p-2 rounded border overflow-x-auto">
+                    {JSON.stringify(user ? { uid: user.uid, email: user.email } : null, null, 2)}
+                  </pre>
+                </div>
+                
+                <div>
+                  <h3 className="font-medium text-gray-700">Customer Session:</h3>
+                  <pre className="mt-1 text-xs bg-white p-2 rounded border overflow-x-auto">
+                    {JSON.stringify(customer, null, 2)}
+                  </pre>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Navigation */}
+        <div className="mt-8 flex space-x-4">
+          <a 
+            href="/"
+            className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"
+          >
+            ← Back to Home
+          </a>
+          <a 
+            href="/dashboard"
+            className="px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700"
+          >
+            View Dashboard →
+          </a>
+          <a 
+            href="/test-images"
+            className="px-4 py-2 bg-purple-600 text-white rounded hover:bg-purple-700"
+          >
+            Test Images →
+          </a>
+        </div>
+      </div>
+    </div>
+  );
+}

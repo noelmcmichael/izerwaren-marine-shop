@@ -1,0 +1,78 @@
+# Optimized version of current working Dockerfile
+# Based on current production setup but with improved efficiency
+
+FROM node:20-alpine AS base
+
+# Install dependencies with better caching
+RUN apk add --no-cache libc6-compat openssl python3 make g++ && \
+    rm -rf /var/cache/apk/*
+
+WORKDIR /app
+
+# === DEPENDENCIES (cached layer) ===
+FROM base AS dependencies
+
+# Copy workspace configuration
+COPY package*.json turbo.json ./
+
+# Create workspace structure and copy package.json files
+COPY apps/frontend/package*.json ./apps/frontend/
+COPY packages/database/package*.json ./packages/database/
+COPY packages/shared/package*.json ./packages/shared/
+COPY packages/shopify-integration/package*.json ./packages/shopify-integration/
+
+# Install all dependencies at once (better caching)
+RUN npm install
+
+# === BUILD STAGE ===
+FROM dependencies AS builder
+
+# Copy all source code
+COPY . .
+
+# Generate Prisma client
+RUN npm run db:generate 2>/dev/null || echo "Prisma generation skipped"
+
+# Build only the frontend (skip backend for now)
+ENV NODE_ENV=production \
+    NEXT_TELEMETRY_DISABLED=1
+
+RUN npm run build --workspace=izerwaren-frontend-hotfix
+
+# === PRODUCTION STAGE ===
+FROM node:20-alpine AS production
+
+# Security updates and minimal dependencies
+RUN apk update && apk upgrade && \
+    apk add --no-cache openssl && \
+    rm -rf /var/cache/apk/*
+
+# Create non-root user
+RUN addgroup -g 1001 -S nodejs && \
+    adduser -S nextjs -u 1001 -G nodejs
+
+WORKDIR /app
+
+# Production environment
+ENV NODE_ENV=production \
+    NEXT_TELEMETRY_DISABLED=1 \
+    PORT=3000
+
+# Copy built application
+COPY --from=builder --chown=nextjs:nodejs /app/apps/frontend/.next/standalone ./
+COPY --from=builder --chown=nextjs:nodejs /app/apps/frontend/.next/static ./apps/frontend/.next/static  
+COPY --from=builder --chown=nextjs:nodejs /app/apps/frontend/public ./apps/frontend/public
+
+# Copy Prisma client (if it exists)
+COPY --from=builder --chown=nextjs:nodejs /app/node_modules/.prisma ./node_modules/.prisma 2>/dev/null || true
+
+USER nextjs
+
+EXPOSE 3000
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+  CMD node -e "require('http').get('http://localhost:3000', (res) => { \
+    process.exit(res.statusCode === 200 ? 0 : 1) \
+  }).on('error', () => process.exit(1))"
+
+CMD ["node", "apps/frontend/server.js"]

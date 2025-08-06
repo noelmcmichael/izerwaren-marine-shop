@@ -1,0 +1,307 @@
+import { prisma as db } from '@izerwaren/database';
+import config from '../lib/config';
+import { Router } from 'express';
+import { z } from 'zod';
+
+import { validateRequest } from '../middleware/validation';
+
+const router = Router();
+
+// Validation schemas
+const syncParamsSchema = z.object({
+  operation: z.enum(['products', 'inventory', 'images', 'full']),
+});
+
+/**
+ * Get Shopify product count
+ * GET /api/v1/sync/shopify/products/count
+ */
+router.get('/shopify/products/count', async (req, res) => {
+  try {
+    console.log('Environment check:', {
+      shop: config.shopify.shopDomain,
+      hasToken: config.shopify.isConfigured,
+      tokenLength: config.shopify.adminAccessToken.length
+    });
+    
+    const { shopifyService } = await import('../services/ShopifyService');
+    
+    console.log('Testing product count endpoint...');
+    const productCount = await shopifyService.getProductCount();
+    console.log('Product count retrieved:', productCount);
+    
+    res.json({ 
+      data: { 
+        shopifyProductCount: productCount,
+        lastChecked: new Date().toISOString()
+      } 
+    });
+  } catch (error) {
+    console.error('Error getting Shopify product count:', error);
+    res.status(500).json({
+      error: 'Failed to get Shopify product count',
+      message: config.isDevelopment ? (error as Error).message : undefined,
+    });
+  }
+});
+
+/**
+ * Get sync status overview
+ * GET /api/v1/sync/status
+ */
+router.get('/status', async (req, res) => {
+  try {
+    // Get sync status from database
+    const syncStats = await db.productSyncLog.findMany({
+      orderBy: { syncedAt: 'desc' },
+      take: 10,
+      select: {
+        id: true,
+        operation: true,
+        status: true,
+        syncedAt: true,
+        errorMessage: true,
+        productId: true,
+        shopifyProductId: true,
+      },
+    });
+
+    // Get overall statistics
+    const [totalProducts, productsWithShopifyId, totalImages, imagesWithShopifyId, lastSuccessfulSync] =
+      await Promise.all([
+        db.product.count(),
+        db.product.count({ where: { shopifyProductId: { not: null } } }),
+        db.productImage.count(),
+        db.productImage.count({ where: { imageUrl: { not: null } } }),
+        db.productSyncLog.findFirst({
+          where: { status: 'SUCCESS' },
+          orderBy: { syncedAt: 'desc' },
+        }),
+      ]);
+
+    const syncStatus = {
+      lastSync: lastSuccessfulSync,
+      recentSyncs: syncStats,
+      statistics: {
+        products: {
+          total: totalProducts,
+          synced: productsWithShopifyId,
+          syncPercentage: totalProducts > 0 ? Math.round((productsWithShopifyId / totalProducts) * 100) : 0,
+        },
+        images: {
+          total: totalImages,
+          synced: imagesWithShopifyId,
+          syncPercentage: totalImages > 0 ? Math.round((imagesWithShopifyId / totalImages) * 100) : 0,
+        },
+      },
+      status:
+        lastSuccessfulSync &&
+        new Date().getTime() - new Date(lastSuccessfulSync.syncedAt).getTime() < 24 * 60 * 60 * 1000
+          ? 'healthy'
+          : 'needs_sync',
+    };
+
+    res.json({ data: syncStatus });
+  } catch (error) {
+    console.error('Error fetching sync status:', error);
+    res.status(500).json({
+      error: 'Failed to fetch sync status',
+      message: config.isDevelopment ? (error as Error).message : undefined,
+    });
+  }
+});
+
+/**
+ * Get Shopify connection status
+ * GET /api/v1/sync/shopify/connection
+ */
+router.get('/shopify/connection', async (req, res) => {
+  try {
+    // Import the ShopifyService
+    const { shopifyService } = await import('../services/ShopifyService');
+    
+    // Test actual Shopify API connection
+    const connectionTest = await shopifyService.testConnection();
+
+    res.json({ data: connectionTest });
+  } catch (error) {
+    console.error('Error testing Shopify connection:', error);
+    res.status(500).json({
+      error: 'Failed to test Shopify connection',
+      message: config.isDevelopment ? (error as Error).message : undefined,
+    });
+  }
+});
+
+/**
+ * Trigger sync operation
+ * POST /api/v1/sync/:operation
+ */
+router.post('/:operation', validateRequest({ params: syncParamsSchema }), async (req, res) => {
+  try {
+    const { operation } = req.params;
+
+    // Check if there's already a sync in progress
+    const ongoingSync = await db.productSyncLog.findFirst({
+      where: {
+        status: 'PARTIAL',
+        createdAt: {
+          gte: new Date(Date.now() - 30 * 60 * 1000), // Last 30 minutes
+        },
+      },
+    });
+
+    if (ongoingSync) {
+      return res.status(409).json({
+        error: 'Sync already in progress',
+        message: `Another ${ongoingSync.operation} sync is currently running`,
+        syncId: ongoingSync.id,
+      });
+    }
+
+    // Create sync log entry
+    const syncLog = await db.productSyncLog.create({
+      data: {
+        operation: operation.toUpperCase(),
+        status: 'PARTIAL',
+        startedAt: new Date(),
+        recordsTotal: 0,
+        recordsProcessed: 0,
+      },
+    });
+
+    // Start sync operation asynchronously
+    // In a real implementation, this would queue a background job
+    startSyncOperation(syncLog.id, operation);
+
+    res.status(202).json({
+      message: `${operation} sync initiated`,
+      syncId: syncLog.id,
+      status: 'started',
+    });
+  } catch (error) {
+    console.error('Error starting sync:', error);
+    res.status(500).json({
+      error: 'Failed to start sync operation',
+      message: config.isDevelopment ? (error as Error).message : undefined,
+    });
+  }
+});
+
+/**
+ * Get specific sync operation status
+ * GET /api/v1/sync/operations/:id
+ */
+router.get('/operations/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const syncLog = await db.productSyncLog.findUnique({
+      where: { id },
+    });
+
+    if (!syncLog) {
+      return res.status(404).json({
+        error: 'Sync operation not found',
+        message: `Sync operation with ID ${id} does not exist`,
+      });
+    }
+
+    res.json({ data: syncLog });
+  } catch (error) {
+    console.error('Error fetching sync operation:', error);
+    res.status(500).json({
+      error: 'Failed to fetch sync operation',
+      message: config.isDevelopment ? (error as Error).message : undefined,
+    });
+  }
+});
+
+/**
+ * Get sync webhook endpoints (for Shopify webhooks)
+ * GET /api/v1/sync/webhooks
+ */
+router.get('/webhooks', (req, res) => {
+  const baseUrl = `${req.protocol}://${req.get('host')}`;
+
+  const webhooks = {
+    endpoints: {
+      productUpdate: `${baseUrl}/api/v1/sync/webhooks/products/update`,
+      productCreate: `${baseUrl}/api/v1/sync/webhooks/products/create`,
+      productDelete: `${baseUrl}/api/v1/sync/webhooks/products/delete`,
+      inventoryUpdate: `${baseUrl}/api/v1/sync/webhooks/inventory/update`,
+      orderCreate: `${baseUrl}/api/v1/sync/webhooks/orders/create`,
+    },
+    configuration: {
+      format: 'json',
+      requiredHeaders: ['X-Shopify-Topic', 'X-Shopify-Hmac-Sha256'],
+      verificationRequired: true,
+    },
+  };
+
+  res.json({ data: webhooks });
+});
+
+/**
+ * Handle product update webhook from Shopify
+ * POST /api/v1/sync/webhooks/products/update
+ */
+router.post('/webhooks/products/update', async (req, res) => {
+  try {
+    // Verify webhook authenticity here
+    const shopifyProduct = req.body;
+
+    // Update local product from Shopify data
+    // This would use the @izerwaren/shopify-integration package
+
+    console.log('Product update webhook received:', shopifyProduct.id);
+
+    res.status(200).json({ received: true });
+  } catch (error) {
+    console.error('Error processing product update webhook:', error);
+    res.status(500).json({
+      error: 'Failed to process webhook',
+      message: config.isDevelopment ? (error as Error).message : undefined,
+    });
+  }
+});
+
+/**
+ * Async function to handle sync operations
+ * In production, this would be moved to a background job queue
+ */
+async function startSyncOperation(syncId: string, operation: string) {
+  try {
+    console.log(`Starting ${operation} sync operation:`, syncId);
+
+    // Simulate sync operation
+    await new Promise(resolve => setTimeout(resolve, 5000));
+
+    // Update sync log as completed
+    await db.productSyncLog.update({
+      where: { id: syncId },
+      data: {
+        status: 'COMPLETED',
+        completedAt: new Date(),
+        recordsProcessed: 100, // Placeholder
+        recordsTotal: 100,
+      },
+    });
+
+    console.log(`Completed ${operation} sync operation:`, syncId);
+  } catch (error) {
+    console.error(`Error in ${operation} sync operation:`, error);
+
+    // Update sync log as failed
+    await db.productSyncLog.update({
+      where: { id: syncId },
+      data: {
+        status: 'FAILED',
+        completedAt: new Date(),
+        errorMessage: (error as Error).message,
+      },
+    });
+  }
+}
+
+export default router;

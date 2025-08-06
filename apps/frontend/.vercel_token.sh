@@ -1,0 +1,1 @@
+export VERCEL_TOKEN=K4aUaPRVwvTdsS0LR7PvWwQt

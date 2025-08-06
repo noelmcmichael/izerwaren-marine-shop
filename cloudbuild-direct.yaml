@@ -1,0 +1,36 @@
+steps:
+  # Build Docker image with Shopify credentials directly
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      [
+        'build',
+        '--build-arg',
+        'SHOPIFY_STORE_DOMAIN=izerw-marine.myshopify.com',
+        '--build-arg',
+        'SHOPIFY_STOREFRONT_ACCESS_TOKEN=0ab05ecb92628e1877d86e67e84b4034',
+        '-t',
+        'gcr.io/$PROJECT_ID/izerwaren-revival:$BUILD_ID',
+        '-t',
+        'gcr.io/$PROJECT_ID/izerwaren-revival:latest',
+        '.',
+      ]
+
+  # Push to Container Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/izerwaren-revival:$BUILD_ID']
+
+  # Deploy to Cloud Run (blue/green via script)
+  - name: 'gcr.io/cloud-builders/gcloud'
+    entrypoint: 'bash'
+    args: ['./scripts/deploy-blue-green.sh']
+    env:
+      - 'PROJECT_ID=$PROJECT_ID'
+      - 'IMAGE_URL=gcr.io/$PROJECT_ID/izerwaren-revival:$BUILD_ID'
+      - 'SERVICE_NAME=izerwaren-revival'
+      - 'REGION=us-central1'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: 'E2_HIGHCPU_8'
+
+timeout: '1200s'

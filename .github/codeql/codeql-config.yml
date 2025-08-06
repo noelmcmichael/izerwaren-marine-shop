@@ -1,0 +1,29 @@
+name: "CodeQL Configuration"
+
+# Disable the default CodeQL queries
+disable-default-queries: false
+
+# Specify additional CodeQL query suites to run
+queries:
+  - uses: security-and-quality
+  - uses: security-extended
+
+# Paths to ignore during analysis
+paths-ignore:
+  - "node_modules/**"
+  - "dist/**"
+  - "build/**"
+  - ".next/**"
+  - "coverage/**"
+  - "**/*.test.js"
+  - "**/*.test.ts"
+  - "**/*.test.tsx"
+  - "**/*.spec.js"
+  - "**/*.spec.ts"
+  - "**/*.spec.tsx"
+
+# Paths to include (override ignore patterns if needed)
+paths:
+  - "apps/**"
+  - "packages/**"
+  - "scripts/**"

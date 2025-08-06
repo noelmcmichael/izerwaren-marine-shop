@@ -1,0 +1,412 @@
+import type { Product, ProductVariant, PrismaClient } from '@izerwaren/database';
+
+import type { ShopifyProduct, ShopifyVariant } from '../types/shopify';
+
+/**
+ * Utility functions for synchronizing data between local database and Shopify
+ */
+
+/**
+ * Create product association record
+ */
+export async function createProductAssociation(
+  prisma: PrismaClient,
+  localProduct: Product,
+  shopifyProduct: ShopifyProduct
+): Promise<void> {
+  await prisma.productSyncLog.create({
+    data: {
+      productId: localProduct.id,
+      shopifyProductId: shopifyProduct.id,
+      operation: 'CREATE',
+      status: 'SUCCESS',
+      sourceData: shopifyProduct as any,
+      syncedAt: new Date(),
+    },
+  });
+
+  // Update the product with Shopify ID
+  await prisma.product.update({
+    where: { id: localProduct.id },
+    data: { shopifyProductId: shopifyProduct.id },
+  });
+}
+
+/**
+ * Update product association record
+ */
+export async function updateProductAssociation(
+  prisma: PrismaClient,
+  localProductId: string,
+  shopifyProduct: ShopifyProduct,
+  operation: 'UPDATE' | 'DELETE' = 'UPDATE'
+): Promise<void> {
+  await prisma.productSyncLog.create({
+    data: {
+      productId: localProductId,
+      shopifyProductId: shopifyProduct.id,
+      operation,
+      status: 'SUCCESS',
+      sourceData: shopifyProduct as any,
+      syncedAt: new Date(),
+    },
+  });
+}
+
+/**
+ * Log sync error
+ */
+export async function logSyncError(
+  prisma: PrismaClient,
+  localProductId: string,
+  shopifyProductId: string | null,
+  operation: 'CREATE' | 'UPDATE' | 'DELETE',
+  error: string,
+  sourceData?: any
+): Promise<void> {
+  await prisma.productSyncLog.create({
+    data: {
+      productId: localProductId,
+      shopifyProductId,
+      operation,
+      status: 'FAILED',
+      errorMessage: error,
+      sourceData,
+      syncedAt: new Date(),
+    },
+  });
+}
+
+/**
+ * Get products that need synchronization
+ */
+export async function getProductsToSync(
+  prisma: PrismaClient,
+  limit: number = 50
+): Promise<
+  Array<
+    Product & {
+      variants?: ProductVariant[];
+      specifications?: any[];
+      images?: any[];
+    }
+  >
+> {
+  return prisma.product.findMany({
+    where: {
+      OR: [
+        { shopifyProductId: null }, // Not yet synced
+        {
+          updatedAt: {
+            gt: new Date(Date.now() - 24 * 60 * 60 * 1000), // Updated in last 24 hours
+          },
+        },
+      ],
+    },
+    include: {
+      shopifyVariants: true,
+      technicalSpecs: true,
+      images: true,
+    },
+    take: limit,
+    orderBy: { updatedAt: 'asc' },
+  });
+}
+
+/**
+ * Check if product needs update in Shopify
+ */
+export function shouldUpdateProduct(
+  localProduct: Product,
+  shopifyProduct: ShopifyProduct
+): boolean {
+  // Compare key fields that might need updating
+  return (
+    localProduct.title !== shopifyProduct.title ||
+    localProduct.description !== shopifyProduct.description ||
+    localProduct.vendor !== shopifyProduct.vendor ||
+    localProduct.status !== shopifyProduct.status ||
+    !arraysEqual(localProduct.tags, shopifyProduct.tags)
+  );
+}
+
+/**
+ * Check if variant needs update in Shopify
+ */
+export function shouldUpdateVariant(
+  localVariant: ProductVariant,
+  shopifyVariant: ShopifyVariant
+): boolean {
+  return (
+    localVariant.title !== shopifyVariant.title ||
+    localVariant.price.toString() !== shopifyVariant.price ||
+    localVariant.sku !== shopifyVariant.sku ||
+    localVariant.inventoryQty !== shopifyVariant.inventory_quantity ||
+    (localVariant.compareAtPrice?.toString() || null) !==
+      (shopifyVariant.compare_at_price || null)
+  );
+}
+
+/**
+ * Get sync status for a product
+ */
+export async function getProductSyncStatus(
+  prisma: PrismaClient,
+  productId: string
+): Promise<{
+  isOnShopify: boolean;
+  lastSyncDate?: Date;
+  lastSyncStatus?: 'SUCCESS' | 'FAILED' | 'PARTIAL';
+  errorMessage?: string;
+}> {
+  const product = await prisma.product.findUnique({
+    where: { id: productId },
+    select: { shopifyProductId: true },
+  });
+
+  const lastSync = await prisma.productSyncLog.findFirst({
+    where: { productId },
+    orderBy: { syncedAt: 'desc' },
+  });
+
+  return {
+    isOnShopify: !!product?.shopifyProductId,
+    lastSyncDate: lastSync?.syncedAt,
+    lastSyncStatus: lastSync?.status,
+    errorMessage: lastSync?.errorMessage || undefined,
+  };
+}
+
+/**
+ * Get overall sync statistics
+ */
+export async function getSyncStatistics(prisma: PrismaClient): Promise<{
+  totalProducts: number;
+  syncedProducts: number;
+  pendingProducts: number;
+  failedProducts: number;
+  lastSyncDate?: Date;
+}> {
+  const totalProducts = await prisma.product.count();
+  const syncedProducts = await prisma.product.count({
+    where: { shopifyProductId: { not: null } },
+  });
+
+  const failedSyncs = await prisma.productSyncLog.groupBy({
+    by: ['productId'],
+    where: {
+      status: 'FAILED',
+      syncedAt: {
+        gte: new Date(Date.now() - 24 * 60 * 60 * 1000), // Last 24 hours
+      },
+    },
+  });
+
+  const lastSync = await prisma.productSyncLog.findFirst({
+    orderBy: { syncedAt: 'desc' },
+  });
+
+  return {
+    totalProducts,
+    syncedProducts,
+    pendingProducts: totalProducts - syncedProducts,
+    failedProducts: failedSyncs.length,
+    lastSyncDate: lastSync?.syncedAt,
+  };
+}
+
+/**
+ * Clean up old sync logs
+ */
+export async function cleanupSyncLogs(
+  prisma: PrismaClient,
+  olderThanDays: number = 30
+): Promise<number> {
+  const cutoffDate = new Date(Date.now() - olderThanDays * 24 * 60 * 60 * 1000);
+
+  const result = await prisma.productSyncLog.deleteMany({
+    where: {
+      syncedAt: { lt: cutoffDate },
+      status: 'SUCCESS', // Keep failed logs longer for debugging
+    },
+  });
+
+  return result.count;
+}
+
+/**
+ * Detect sync conflicts
+ */
+export async function detectSyncConflicts(
+  prisma: PrismaClient,
+  productId: string,
+  shopifyProduct: ShopifyProduct
+): Promise<{
+  hasConflicts: boolean;
+  conflicts: Array<{
+    field: string;
+    localValue: any;
+    shopifyValue: any;
+  }>;
+}> {
+  const localProduct = await prisma.product.findUnique({
+    where: { id: productId },
+    include: { shopifyVariants: true },
+  });
+
+  if (!localProduct) {
+    return { hasConflicts: false, conflicts: [] };
+  }
+
+  const conflicts = [];
+
+  // Check product-level conflicts
+  if (localProduct.title !== shopifyProduct.title) {
+    conflicts.push({
+      field: 'title',
+      localValue: localProduct.title,
+      shopifyValue: shopifyProduct.title,
+    });
+  }
+
+  if (localProduct.description !== shopifyProduct.description) {
+    conflicts.push({
+      field: 'description',
+      localValue: localProduct.description,
+      shopifyValue: shopifyProduct.description,
+    });
+  }
+
+  // Check variant conflicts
+  for (const localVariant of localProduct.shopifyVariants || []) {
+    const shopifyVariant = shopifyProduct.variants?.find(v => v.sku === localVariant.sku);
+
+    if (shopifyVariant && shouldUpdateVariant(localVariant, shopifyVariant)) {
+      conflicts.push({
+        field: `variant_${localVariant.sku}_price`,
+        localValue: localVariant.price,
+        shopifyValue: shopifyVariant.price,
+      });
+    }
+  }
+
+  return {
+    hasConflicts: conflicts.length > 0,
+    conflicts,
+  };
+}
+
+/**
+ * Resolve sync conflicts by choosing source
+ */
+export async function resolveSyncConflicts(
+  prisma: PrismaClient,
+  productId: string,
+  resolution: 'local' | 'shopify',
+  conflicts: Array<{ field: string; localValue: any; shopifyValue: any }>
+): Promise<void> {
+  if (resolution === 'shopify') {
+    // Update local database with Shopify values
+    const updateData: any = {};
+
+    for (const conflict of conflicts) {
+      if (conflict.field === 'title') {
+        updateData.title = conflict.shopifyValue;
+      } else if (conflict.field === 'description') {
+        updateData.description = conflict.shopifyValue;
+      }
+      // Add more field mappings as needed
+    }
+
+    if (Object.keys(updateData).length > 0) {
+      await prisma.product.update({
+        where: { id: productId },
+        data: updateData,
+      });
+    }
+  }
+
+  // If resolution is 'local', the next sync will update Shopify
+  // Log the conflict resolution
+  await prisma.productSyncLog.create({
+    data: {
+      productId,
+      operation: 'UPDATE',
+      status: 'SUCCESS',
+      sourceData: { resolution, conflicts },
+      syncedAt: new Date(),
+    },
+  });
+}
+
+/**
+ * Utility function to compare arrays
+ */
+function arraysEqual(a: any[], b: any[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((val, index) => val === b[index]);
+}
+
+/**
+ * Generate sync report
+ */
+export async function generateSyncReport(
+  prisma: PrismaClient,
+  startDate?: Date,
+  endDate?: Date
+): Promise<{
+  period: { start: Date; end: Date };
+  summary: {
+    totalOperations: number;
+    successfulOperations: number;
+    failedOperations: number;
+    operationsByType: Record<string, number>;
+  };
+  failures: Array<{
+    productId: string;
+    operation: string;
+    error: string;
+    timestamp: Date;
+  }>;
+}> {
+  const start = startDate || new Date(Date.now() - 7 * 24 * 60 * 60 * 1000); // 7 days ago
+  const end = endDate || new Date();
+
+  const logs = await prisma.productSyncLog.findMany({
+    where: {
+      syncedAt: {
+        gte: start,
+        lte: end,
+      },
+    },
+    orderBy: { syncedAt: 'desc' },
+  });
+
+  const summary = {
+    totalOperations: logs.length,
+    successfulOperations: logs.filter(log => log.status === 'SUCCESS').length,
+    failedOperations: logs.filter(log => log.status === 'FAILED').length,
+    operationsByType: logs.reduce(
+      (acc, log) => {
+        acc[log.operation] = (acc[log.operation] || 0) + 1;
+        return acc;
+      },
+      {} as Record<string, number>
+    ),
+  };
+
+  const failures = logs
+    .filter(log => log.status === 'FAILED')
+    .map(log => ({
+      productId: log.productId || 'unknown',
+      operation: log.operation,
+      error: log.errorMessage || 'Unknown error',
+      timestamp: log.syncedAt,
+    }));
+
+  return {
+    period: { start, end },
+    summary,
+    failures,
+  };
+}

@@ -1,0 +1,80 @@
+steps:
+  # Install dependencies and run tests
+  - name: 'node:18-alpine'
+    entrypoint: 'npm'
+    args: ['ci']
+
+  # Type checking
+  - name: 'node:18-alpine'
+    entrypoint: 'npm'
+    args: ['run', 'type-check']
+
+  # Run linting
+  - name: 'node:18-alpine'
+    entrypoint: 'npm'
+    args: ['run', 'lint']
+
+  # Run tests with coverage
+  - name: 'node:18-alpine'
+    entrypoint: 'npm'
+    args: ['run', 'test:coverage']
+    env:
+      - 'CI=true'
+
+  # Build Docker image (NO SECRETS IN BUILD PROCESS)
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      [
+        'build',
+        '--build-arg',
+        'BUILD_VERSION=$BUILD_ID',
+        '--build-arg',
+        'BUILD_TIMESTAMP=$_BUILD_TIMESTAMP',
+        '-t',
+        'gcr.io/$PROJECT_ID/izerwaren-revival:$BUILD_ID',
+        '-t',
+        'gcr.io/$PROJECT_ID/izerwaren-revival:latest',
+        '.',
+      ]
+    env:
+      - '_BUILD_TIMESTAMP=$_BUILD_TIMESTAMP'
+
+  # Push to Container Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/izerwaren-revival:$BUILD_ID']
+
+  # Security: Scan Docker image for secrets and vulnerabilities
+  - name: 'gcr.io/cloud-builders/gcloud'
+    entrypoint: 'bash'
+    args: 
+      - '-c'
+      - |
+        echo "🔍 Scanning Docker image for security issues..."
+        # Check if any secrets accidentally embedded in image
+        docker history --no-trunc gcr.io/$PROJECT_ID/izerwaren-revival:$BUILD_ID | \
+          grep -iE "(password|secret|token|key|api)" || echo "✅ No secrets found in image layers"
+        echo "🔒 Security scan completed"
+
+  # Deploy to Cloud Run with secure runtime secret injection
+  - name: 'gcr.io/cloud-builders/gcloud'
+    entrypoint: 'bash'
+    args: ['./scripts/deploy-blue-green-secure.sh']
+    env:
+      - 'PROJECT_ID=$PROJECT_ID'
+      - 'IMAGE_URL=gcr.io/$PROJECT_ID/izerwaren-revival:$BUILD_ID'
+      - 'SERVICE_NAME=izerwaren-revival'
+      - 'REGION=us-central1'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: 'E2_HIGHCPU_8'
+
+timeout: '1200s'
+
+# Substitutions for build metadata (non-sensitive)
+substitutions:
+  _BUILD_TIMESTAMP: 'unknown'
+
+# Note: Secrets are NO LONGER used in build process
+# All sensitive configuration is injected at runtime via Cloud Run environment variables
+# This ensures no secrets are embedded in Docker image layers

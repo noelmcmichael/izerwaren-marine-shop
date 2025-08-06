@@ -1,0 +1,41 @@
+# Simplified Dockerfile for Shopify Integration
+FROM node:18-alpine
+
+# Install dependencies for native modules
+RUN apk add --no-cache libc6-compat
+
+WORKDIR /app
+
+# Set production environment
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+
+# Set Shopify environment variables (baked into build)
+ENV NEXT_PUBLIC_SHOPIFY_STORE_DOMAIN=izerw-marine.myshopify.com
+ENV NEXT_PUBLIC_SHOPIFY_STOREFRONT_ACCESS_TOKEN=0ab05ecb92628e1877d86e67e84b4034
+ENV SHOPIFY_ADMIN_ACCESS_TOKEN=${SHOPIFY_ADMIN_ACCESS_TOKEN}
+ENV SHOPIFY_API_KEY=de453a5bc224c33774b277db1eaefb5b
+ENV SHOPIFY_API_SECRET=0fa667c90ffb68978b78dfdc46463bd2
+ENV NEXT_PUBLIC_ENVIRONMENT=production
+ENV NEXT_PUBLIC_DEV_MODE=false
+
+# Copy package files
+COPY apps/frontend/package*.json ./
+
+# Install all dependencies (needed for build)
+RUN npm install
+
+# Copy source code
+COPY apps/frontend/ ./
+
+# Build the application with Shopify credentials
+RUN npm run build
+
+# Clean up to reduce image size
+RUN npm cache clean --force
+
+# Expose port
+EXPOSE 3000
+
+# Start the application
+CMD ["npm", "start"]

@@ -1,0 +1,20 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: izerwaren-revamp-2-0-web
+spec:
+  template:
+    spec:
+      containers:
+        - image: gcr.io/noelmc/izerwaren-revival:api-fallback-fix-amd64
+          env:
+            - name: NEXT_PUBLIC_SHOPIFY_STORE_DOMAIN
+              value: 'izerw-marine.myshopify.com'
+            - name: NEXT_PUBLIC_SHOPIFY_STOREFRONT_ACCESS_TOKEN
+              value: 'PLACEHOLDER_STOREFRONT_TOKEN'
+            - name: SHOPIFY_ADMIN_ACCESS_TOKEN
+              value: 'PLACEHOLDER_ADMIN_TOKEN'
+            - name: SHOPIFY_API_KEY
+              value: 'PLACEHOLDER_API_KEY'
+            - name: SHOPIFY_API_SECRET
+              value: 'PLACEHOLDER_API_SECRET'

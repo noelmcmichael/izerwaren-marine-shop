@@ -1,0 +1,511 @@
+import { PrismaClient } from '@prisma/client';
+import { FileService } from './FileService';
+import type { 
+  CartSummary, 
+  CartItem, 
+  SavedCart, 
+  ValidationResult, 
+  BulkUploadResult 
+} from '../types/cart';
+
+export class CartService {
+  private static prisma: PrismaClient;
+
+  static initialize(prisma: PrismaClient) {
+    this.prisma = prisma;
+  }
+
+  // Get current cart for customer
+  static async getCart(customerId: string): Promise<CartSummary> {
+    const cartItems = await this.prisma.cartItem.findMany({
+      where: {
+        customerId: customerId
+      },
+      include: {
+        product: {
+          include: {
+            shopifyVariants: true,
+            images: {
+              where: { isPrimary: true },
+              take: 1
+            }
+          }
+        }
+      },
+      orderBy: {
+        createdAt: 'asc'
+      }
+    });
+
+    const items: CartItem[] = cartItems.map(cartItem => {
+      const variant = cartItem.product?.shopifyVariants?.find(
+        v => v.shopifyVariantId === cartItem.shopifyVariantId
+      );
+      const primaryImage = cartItem.product?.images?.[0];
+
+      return {
+        id: cartItem.id,
+        shopify_product_id: cartItem.shopifyProductId,
+        shopify_variant_id: cartItem.shopifyVariantId,
+        sku: variant?.sku || '',
+        title: cartItem.product?.title || 'Unknown Product',
+        variant_title: variant?.title,
+        image_url: primaryImage?.imageUrl || undefined,
+        quantity: cartItem.quantity,
+        unit_price: Number(cartItem.unitPrice),
+        list_price: Number(cartItem.unitPrice), // Will be updated with pricing service
+        discount_percent: 0, // Will be calculated by pricing service
+        total_price: Number(cartItem.totalPrice),
+        minimum_quantity: 1, // TODO: Get from product settings
+        quantity_increments: 1, // TODO: Get from product settings
+        in_stock: this.checkStockStatus(variant?.inventoryQuantity || 0, variant?.inventoryManagement || ''),
+        stock_quantity: variant?.inventoryQuantity || 0
+      };
+    });
+
+    return this.buildCartSummary(items);
+  }
+
+  // Add single item to cart
+  static async addItem(customerId: string, item: {
+    shopify_product_id: string;
+    shopify_variant_id: string;
+    quantity: number;
+  }): Promise<CartSummary> {
+    // Get product details
+    const product = await this.prisma.product.findFirst({
+      where: {
+        shopifyProductId: item.shopify_product_id
+      },
+      include: {
+        shopifyVariants: {
+          where: {
+            shopifyVariantId: item.shopify_variant_id
+          }
+        }
+      }
+    });
+
+    if (!product) {
+      throw new Error(`Product ${item.shopify_product_id} not found`);
+    }
+
+    const variant = product.shopifyVariants[0];
+    if (!variant) {
+      throw new Error(`Variant ${item.shopify_variant_id} not found`);
+    }
+
+    // Check stock availability
+    if (!this.checkStockStatus(variant.inventoryQuantity || 0, variant.inventoryManagement || '')) {
+      throw new Error(`Product ${variant.sku} is out of stock`);
+    }
+
+    if ((variant.inventoryQuantity || 0) < item.quantity) {
+      throw new Error(`Insufficient stock for ${variant.sku}. Available: ${variant.inventoryQuantity}`);
+    }
+
+    const unitPrice = Number(variant.price || 0);
+    const totalPrice = unitPrice * item.quantity;
+
+    // Check if item already exists in cart
+    const existingItem = await this.prisma.cartItem.findUnique({
+      where: {
+        customerId_shopifyVariantId: {
+          customerId: customerId,
+          shopifyVariantId: item.shopify_variant_id
+        }
+      }
+    });
+
+    if (existingItem) {
+      // Update existing item
+      const newQuantity = existingItem.quantity + item.quantity;
+      await this.prisma.cartItem.update({
+        where: {
+          id: existingItem.id
+        },
+        data: {
+          quantity: newQuantity,
+          totalPrice: newQuantity * Number(existingItem.unitPrice)
+        }
+      });
+    } else {
+      // Create new item
+      await this.prisma.cartItem.create({
+        data: {
+          customerId: customerId,
+          shopifyProductId: item.shopify_product_id,
+          shopifyVariantId: item.shopify_variant_id,
+          quantity: item.quantity,
+          unitPrice: unitPrice,
+          totalPrice: totalPrice
+        }
+      });
+    }
+
+    return this.getCart(customerId);
+  }
+
+  // Update item quantity
+  static async updateQuantity(customerId: string, itemId: string, quantity: number): Promise<CartSummary> {
+    if (quantity === 0) {
+      return this.removeItem(customerId, itemId);
+    }
+
+    // Get current item
+    const cartItem = await this.prisma.cartItem.findFirst({
+      where: {
+        id: itemId,
+        customerId: customerId
+      },
+      include: {
+        product: {
+          include: {
+            shopifyVariants: true
+          }
+        }
+      }
+    });
+
+    if (!cartItem) {
+      throw new Error('Cart item not found');
+    }
+
+    const variant = cartItem.product?.shopifyVariants?.find(
+      v => v.shopifyVariantId === cartItem.shopifyVariantId
+    );
+
+    // Check stock availability
+    if (variant && (variant.inventoryQuantity || 0) < quantity) {
+      throw new Error(`Insufficient stock for ${variant.sku}. Available: ${variant.inventoryQuantity}`);
+    }
+
+    // Update quantity and total
+    await this.prisma.cartItem.update({
+      where: {
+        id: itemId
+      },
+      data: {
+        quantity: quantity,
+        totalPrice: quantity * Number(cartItem.unitPrice)
+      }
+    });
+
+    return this.getCart(customerId);
+  }
+
+  // Remove item from cart
+  static async removeItem(customerId: string, itemId: string): Promise<CartSummary> {
+    const result = await this.prisma.cartItem.deleteMany({
+      where: {
+        id: itemId,
+        customerId: customerId
+      }
+    });
+
+    if (result.count === 0) {
+      throw new Error('Cart item not found');
+    }
+
+    return this.getCart(customerId);
+  }
+
+  // Clear entire cart
+  static async clearCart(customerId: string): Promise<CartSummary> {
+    await this.prisma.cartItem.deleteMany({
+      where: {
+        customerId: customerId
+      }
+    });
+
+    return this.getCart(customerId);
+  }
+
+  // Add multiple items to cart
+  static async addMultipleItems(customerId: string, items: Array<{
+    shopify_product_id: string;
+    shopify_variant_id: string;
+    quantity: number;
+  }>): Promise<CartSummary> {
+    for (const item of items) {
+      try {
+        await this.addItem(customerId, item);
+      } catch (error) {
+        console.warn(`Failed to add item ${item.shopify_product_id}:`, error.message);
+        // Continue with other items instead of failing entire operation
+      }
+    }
+
+    return this.getCart(customerId);
+  }
+
+  // Update multiple quantities
+  static async updateMultipleQuantities(customerId: string, updates: Array<{
+    itemId: string;
+    quantity: number;
+  }>): Promise<CartSummary> {
+    for (const update of updates) {
+      try {
+        await this.updateQuantity(customerId, update.itemId, update.quantity);
+      } catch (error) {
+        console.warn(`Failed to update item ${update.itemId}:`, error.message);
+      }
+    }
+
+    return this.getCart(customerId);
+  }
+
+  // Save cart with optional name
+  static async saveCart(customerId: string, name?: string): Promise<string> {
+    const cart = await this.getCart(customerId);
+    
+    if (cart.items.length === 0) {
+      throw new Error('Cannot save empty cart');
+    }
+
+    const cartName = name || `Cart ${new Date().toLocaleDateString()}`;
+
+    const savedCart = await this.prisma.savedCart.create({
+      data: {
+        customerId: customerId,
+        name: cartName,
+        itemCount: cart.item_count,
+        totalValue: cart.total_estimated
+      }
+    });
+
+    // Save cart items
+    for (const item of cart.items) {
+      await this.prisma.savedCartItem.create({
+        data: {
+          savedCartId: savedCart.id,
+          shopifyProductId: item.shopify_product_id,
+          shopifyVariantId: item.shopify_variant_id,
+          quantity: item.quantity,
+          unitPrice: item.unit_price,
+          totalPrice: item.total_price
+        }
+      });
+    }
+
+    return savedCart.id;
+  }
+
+  // Load saved cart
+  static async loadCart(customerId: string, cartId: string): Promise<CartSummary> {
+    // Verify cart ownership
+    const savedCart = await this.prisma.savedCart.findFirst({
+      where: {
+        id: cartId,
+        customerId: customerId
+      },
+      include: {
+        items: true
+      }
+    });
+
+    if (!savedCart) {
+      throw new Error('Saved cart not found');
+    }
+
+    // Clear current cart
+    await this.clearCart(customerId);
+
+    // Add items to current cart
+    for (const item of savedCart.items) {
+      try {
+        await this.addItem(customerId, {
+          shopify_product_id: item.shopifyProductId,
+          shopify_variant_id: item.shopifyVariantId,
+          quantity: item.quantity
+        });
+      } catch (error) {
+        console.warn(`Failed to load item ${item.shopifyProductId}:`, error.message);
+      }
+    }
+
+    return this.getCart(customerId);
+  }
+
+  // Get saved carts list
+  static async getSavedCarts(customerId: string): Promise<SavedCart[]> {
+    const savedCarts = await this.prisma.savedCart.findMany({
+      where: {
+        customerId: customerId
+      },
+      orderBy: {
+        updatedAt: 'desc'
+      }
+    });
+
+    return savedCarts.map(cart => ({
+      id: cart.id,
+      name: cart.name,
+      item_count: cart.itemCount,
+      total_value: Number(cart.totalValue),
+      created_at: cart.createdAt.toISOString(),
+      updated_at: cart.updatedAt.toISOString()
+    }));
+  }
+
+  // Validate cart
+  static async validateCart(customerId: string, customer: any): Promise<ValidationResult[]> {
+    const cart = await this.getCart(customerId);
+    const results: ValidationResult[] = [];
+
+    for (const item of cart.items) {
+      // Check minimum quantities
+      if (item.minimum_quantity && item.quantity < item.minimum_quantity) {
+        results.push({
+          item_id: item.id,
+          type: 'minimum_quantity',
+          message: `${item.title} requires minimum quantity of ${item.minimum_quantity}`,
+          severity: 'error',
+          suggested_action: `Increase quantity to ${item.minimum_quantity} or remove item`
+        });
+      }
+
+      // Check stock availability
+      if (!item.in_stock) {
+        results.push({
+          item_id: item.id,
+          type: 'stock',
+          message: `${item.title} is currently out of stock`,
+          severity: 'error',
+          suggested_action: 'Remove item or check back later'
+        });
+      } else if (item.stock_quantity > 0 && item.quantity > item.stock_quantity) {
+        results.push({
+          item_id: item.id,
+          type: 'stock',
+          message: `Only ${item.stock_quantity} units available for ${item.title}`,
+          severity: 'warning',
+          suggested_action: `Reduce quantity to ${item.stock_quantity}`
+        });
+      }
+
+      // Check quantity increments
+      if (item.quantity_increments && item.quantity % item.quantity_increments !== 0) {
+        const suggestedQty = Math.ceil(item.quantity / item.quantity_increments) * item.quantity_increments;
+        results.push({
+          item_id: item.id,
+          type: 'minimum_quantity',
+          message: `${item.title} must be ordered in increments of ${item.quantity_increments}`,
+          severity: 'warning',
+          suggested_action: `Adjust quantity to ${suggestedQty}`
+        });
+      }
+    }
+
+    return results;
+  }
+
+  // Export cart
+  static async exportCart(customerId: string, format: 'csv' | 'pdf', customer: any): Promise<{
+    buffer: Buffer;
+    filename: string;
+    mimeType: string;
+  }> {
+    const cart = await this.getCart(customerId);
+    
+    if (format === 'csv') {
+      return FileService.generateCartCSV(cart, customer);
+    } else {
+      return FileService.generateCartPDF(cart, customer);
+    }
+  }
+
+  // Upload bulk order from file
+  static async uploadBulkOrder(customerId: string, file: Express.Multer.File): Promise<BulkUploadResult> {
+    try {
+      const items = await FileService.parseBulkOrderFile(file);
+      const result: BulkUploadResult = {
+        successful: 0,
+        failed: 0,
+        errors: [],
+        warnings: []
+      };
+
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        const row = i + 2; // Account for header row
+
+        try {
+          // Find product by SKU
+          const variant = await this.prisma.productVariant.findFirst({
+            where: {
+              sku: item.sku
+            },
+            include: {
+              product: true
+            }
+          });
+          
+          if (!variant) {
+            result.errors.push({
+              row,
+              sku: item.sku,
+              message: 'Product not found'
+            });
+            result.failed++;
+            continue;
+          }
+
+          // Add to cart
+          await this.addItem(customerId, {
+            shopify_product_id: variant.product.shopifyProductId!,
+            shopify_variant_id: variant.shopifyVariantId,
+            quantity: item.quantity
+          });
+
+          result.successful++;
+        } catch (error) {
+          result.errors.push({
+            row,
+            sku: item.sku,
+            message: error.message
+          });
+          result.failed++;
+        }
+      }
+
+      return result;
+    } finally {
+      // Clean up uploaded file
+      FileService.cleanup(file.path);
+    }
+  }
+
+  // Reorder from order history
+  static async reorderFromHistory(customerId: string, orderId: string): Promise<CartSummary> {
+    // This would integrate with Shopify Orders API to get order details
+    // For now, return current cart
+    throw new Error('Reorder functionality requires Shopify Orders API integration');
+  }
+
+  // Helper methods
+  private static checkStockStatus(inventoryQuantity: number, inventoryManagement: string): boolean {
+    if (inventoryManagement === 'shopify' && inventoryQuantity <= 0) {
+      return false;
+    }
+    return true;
+  }
+
+  private static buildCartSummary(items: CartItem[]): CartSummary {
+    const itemCount = items.length;
+    const totalQuantity = items.reduce((sum, item) => sum + item.quantity, 0);
+    const subtotal = items.reduce((sum, item) => sum + item.total_price, 0);
+
+    return {
+      items,
+      item_count: itemCount,
+      total_quantity: totalQuantity,
+      subtotal,
+      total_discount: 0, // Will be calculated by pricing service
+      total_estimated: subtotal,
+      tier_discount_percent: 0, // Will be set by pricing service
+      volume_discounts_applied: [],
+      savings_from_list_price: 0
+    };
+  }
+}

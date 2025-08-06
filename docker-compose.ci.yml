@@ -1,0 +1,49 @@
+# CI-specific Docker Compose configuration
+# Used for testing Docker setup in GitHub Actions
+
+services:
+  # CI-optimized database
+  database:
+    environment:
+      POSTGRES_DB: izerwaren_ci
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+
+  # CI-optimized backend
+  backend:
+    build:
+      context: .
+      dockerfile: apps/backend/Dockerfile
+      target: development
+    environment:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://postgres:postgres@database:5432/izerwaren_ci?schema=public
+      PORT: 3001
+    ports:
+      - "3001:3001"
+    depends_on:
+      database:
+        condition: service_healthy
+    command: ["sh", "-c", "npm run db:migrate && npm run backend:dev"]
+
+  # CI-optimized frontend
+  frontend:
+    build:
+      context: .
+      dockerfile: apps/frontend/Dockerfile
+      target: development
+    environment:
+      NODE_ENV: test
+      NEXT_PUBLIC_API_URL: http://localhost:3001
+      DATABASE_URL: postgresql://postgres:postgres@database:5432/izerwaren_ci?schema=public
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+
+  # Remove PgAdmin from CI
+  pgadmin:
+    profiles:
+      - disabled

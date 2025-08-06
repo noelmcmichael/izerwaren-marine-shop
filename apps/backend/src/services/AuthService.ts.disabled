@@ -1,0 +1,414 @@
+import { PrismaClient } from '@prisma/client';
+import admin from 'firebase-admin';
+import type { DealerTier } from '../types/customer';
+
+export interface CustomerProfile {
+  id: string;
+  firebase_uid: string;
+  company_name: string;
+  contact_email: string;
+  tier: DealerTier;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CustomerPermissions {
+  can_view_pricing: boolean;
+  can_request_quotes: boolean;
+  can_place_orders: boolean;
+  can_access_bulk_ordering: boolean;
+  can_access_api: boolean;
+  can_view_order_history: boolean;
+  can_export_data: boolean;
+  can_manage_users: boolean;
+}
+
+export interface AuthenticatedCustomer {
+  firebase_user: admin.auth.DecodedIdToken;
+  profile: CustomerProfile;
+  permissions: CustomerPermissions;
+}
+
+export class AuthService {
+  private static prisma: PrismaClient;
+
+  static initialize(prisma: PrismaClient) {
+    this.prisma = prisma;
+  }
+
+  // Validate Firebase token and get customer profile
+  static async validateCustomerToken(token: string): Promise<AuthenticatedCustomer | null> {
+    try {
+      // Verify Firebase token
+      const decodedToken = await admin.auth().verifyIdToken(token);
+      
+      // Get customer profile from database
+      const profile = await this.getCustomerProfile(decodedToken.uid);
+      
+      if (!profile || !profile.is_active) {
+        return null;
+      }
+
+      // Get customer permissions based on tier
+      const permissions = this.getCustomerPermissions(profile.tier);
+
+      return {
+        firebase_user: decodedToken,
+        profile,
+        permissions
+      };
+    } catch (error) {
+      console.error('Token validation error:', error);
+      return null;
+    }
+  }
+
+  // Get customer profile by Firebase UID
+  static async getCustomerProfile(firebaseUid: string): Promise<CustomerProfile | null> {
+    const client = await this.pool.connect();
+    
+    try {
+      const query = `
+        SELECT 
+          id,
+          firebase_uid,
+          company_name,
+          contact_email,
+          tier,
+          is_active,
+          created_at,
+          updated_at
+        FROM dealers
+        WHERE firebase_uid = $1
+      `;
+      
+      const result = await client.query(query, [firebaseUid]);
+      
+      if (result.rows.length === 0) {
+        return null;
+      }
+
+      const row = result.rows[0];
+      return {
+        id: row.id,
+        firebase_uid: row.firebase_uid,
+        company_name: row.company_name,
+        contact_email: row.contact_email,
+        tier: row.tier as DealerTier,
+        is_active: row.is_active,
+        created_at: row.created_at.toISOString(),
+        updated_at: row.updated_at.toISOString()
+      };
+    } finally {
+      client.release();
+    }
+  }
+
+  // Get customer profile by customer ID
+  static async getCustomerById(customerId: string): Promise<CustomerProfile | null> {
+    const client = await this.pool.connect();
+    
+    try {
+      const query = `
+        SELECT 
+          id,
+          firebase_uid,
+          company_name,
+          contact_email,
+          tier,
+          is_active,
+          created_at,
+          updated_at
+        FROM dealers
+        WHERE id = $1
+      `;
+      
+      const result = await client.query(query, [customerId]);
+      
+      if (result.rows.length === 0) {
+        return null;
+      }
+
+      const row = result.rows[0];
+      return {
+        id: row.id,
+        firebase_uid: row.firebase_uid,
+        company_name: row.company_name,
+        contact_email: row.contact_email,
+        tier: row.tier as DealerTier,
+        is_active: row.is_active,
+        created_at: row.created_at.toISOString(),
+        updated_at: row.updated_at.toISOString()
+      };
+    } finally {
+      client.release();
+    }
+  }
+
+  // Get permissions based on tier
+  static getCustomerPermissions(tier: DealerTier): CustomerPermissions {
+    const basePermissions: CustomerPermissions = {
+      can_view_pricing: false,
+      can_request_quotes: true,
+      can_place_orders: false,
+      can_access_bulk_ordering: false,
+      can_access_api: false,
+      can_view_order_history: false,
+      can_export_data: false,
+      can_manage_users: false
+    };
+
+    switch (tier) {
+      case 'STANDARD':
+        return {
+          ...basePermissions,
+          can_view_pricing: true,
+          can_place_orders: true,
+          can_view_order_history: true
+        };
+
+      case 'PREMIUM':
+        return {
+          ...basePermissions,
+          can_view_pricing: true,
+          can_place_orders: true,
+          can_access_bulk_ordering: true,
+          can_view_order_history: true,
+          can_export_data: true
+        };
+
+      case 'ENTERPRISE':
+        return {
+          ...basePermissions,
+          can_view_pricing: true,
+          can_place_orders: true,
+          can_access_bulk_ordering: true,
+          can_access_api: true,
+          can_view_order_history: true,
+          can_export_data: true,
+          can_manage_users: true
+        };
+
+      default:
+        return basePermissions;
+    }
+  }
+
+  // Create or update customer profile
+  static async createOrUpdateCustomer(customerData: {
+    firebase_uid: string;
+    company_name: string;
+    contact_email: string;
+    tier?: DealerTier;
+  }): Promise<CustomerProfile> {
+    const client = await this.pool.connect();
+    
+    try {
+      const tier = customerData.tier || 'STANDARD';
+      
+      const upsertQuery = `
+        INSERT INTO dealers (
+          firebase_uid, company_name, contact_email, tier, is_active, created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, true, NOW(), NOW())
+        ON CONFLICT (firebase_uid) 
+        DO UPDATE SET
+          company_name = EXCLUDED.company_name,
+          contact_email = EXCLUDED.contact_email,
+          tier = EXCLUDED.tier,
+          updated_at = NOW()
+        RETURNING *
+      `;
+      
+      const result = await client.query(upsertQuery, [
+        customerData.firebase_uid,
+        customerData.company_name,
+        customerData.contact_email,
+        tier
+      ]);
+
+      const row = result.rows[0];
+      return {
+        id: row.id,
+        firebase_uid: row.firebase_uid,
+        company_name: row.company_name,
+        contact_email: row.contact_email,
+        tier: row.tier as DealerTier,
+        is_active: row.is_active,
+        created_at: row.created_at.toISOString(),
+        updated_at: row.updated_at.toISOString()
+      };
+    } finally {
+      client.release();
+    }
+  }
+
+  // Update customer tier
+  static async updateCustomerTier(customerId: string, tier: DealerTier): Promise<CustomerProfile | null> {
+    const client = await this.pool.connect();
+    
+    try {
+      const updateQuery = `
+        UPDATE dealers 
+        SET tier = $1, updated_at = NOW()
+        WHERE id = $2
+        RETURNING *
+      `;
+      
+      const result = await client.query(updateQuery, [tier, customerId]);
+      
+      if (result.rows.length === 0) {
+        return null;
+      }
+
+      const row = result.rows[0];
+      return {
+        id: row.id,
+        firebase_uid: row.firebase_uid,
+        company_name: row.company_name,
+        contact_email: row.contact_email,
+        tier: row.tier as DealerTier,
+        is_active: row.is_active,
+        created_at: row.created_at.toISOString(),
+        updated_at: row.updated_at.toISOString()
+      };
+    } finally {
+      client.release();
+    }
+  }
+
+  // Deactivate customer
+  static async deactivateCustomer(customerId: string): Promise<boolean> {
+    const client = await this.pool.connect();
+    
+    try {
+      const updateQuery = `
+        UPDATE dealers 
+        SET is_active = false, updated_at = NOW()
+        WHERE id = $1
+      `;
+      
+      const result = await client.query(updateQuery, [customerId]);
+      return result.rowCount > 0;
+    } finally {
+      client.release();
+    }
+  }
+
+  // List all customers with pagination
+  static async listCustomers(offset: number = 0, limit: number = 50): Promise<{
+    customers: CustomerProfile[];
+    total: number;
+  }> {
+    const client = await this.pool.connect();
+    
+    try {
+      // Get total count
+      const countQuery = 'SELECT COUNT(*) as total FROM dealers';
+      const countResult = await client.query(countQuery);
+      const total = parseInt(countResult.rows[0].total);
+
+      // Get paginated customers
+      const query = `
+        SELECT 
+          id,
+          firebase_uid,
+          company_name,
+          contact_email,
+          tier,
+          is_active,
+          created_at,
+          updated_at
+        FROM dealers
+        ORDER BY created_at DESC
+        LIMIT $1 OFFSET $2
+      `;
+      
+      const result = await client.query(query, [limit, offset]);
+      
+      const customers = result.rows.map(row => ({
+        id: row.id,
+        firebase_uid: row.firebase_uid,
+        company_name: row.company_name,
+        contact_email: row.contact_email,
+        tier: row.tier as DealerTier,
+        is_active: row.is_active,
+        created_at: row.created_at.toISOString(),
+        updated_at: row.updated_at.toISOString()
+      }));
+
+      return { customers, total };
+    } finally {
+      client.release();
+    }
+  }
+
+  // Generate API key for enterprise customers
+  static async generateApiKey(customerId: string): Promise<string | null> {
+    const customer = await this.getCustomerById(customerId);
+    
+    if (!customer || customer.tier !== 'ENTERPRISE') {
+      return null;
+    }
+
+    // Generate a secure API key
+    const apiKey = `izw_${customerId.replace(/-/g, '')}_${Date.now()}`;
+    
+    // Store API key in database (you might want to hash it)
+    const client = await this.pool.connect();
+    
+    try {
+      const updateQuery = `
+        UPDATE dealers 
+        SET api_key = $1, updated_at = NOW()
+        WHERE id = $2
+      `;
+      
+      await client.query(updateQuery, [apiKey, customerId]);
+      return apiKey;
+    } finally {
+      client.release();
+    }
+  }
+
+  // Validate API key for programmatic access
+  static async validateApiKey(apiKey: string): Promise<CustomerProfile | null> {
+    const client = await this.pool.connect();
+    
+    try {
+      const query = `
+        SELECT 
+          id,
+          firebase_uid,
+          company_name,
+          contact_email,
+          tier,
+          is_active,
+          created_at,
+          updated_at
+        FROM dealers
+        WHERE api_key = $1 AND is_active = true
+      `;
+      
+      const result = await client.query(query, [apiKey]);
+      
+      if (result.rows.length === 0) {
+        return null;
+      }
+
+      const row = result.rows[0];
+      return {
+        id: row.id,
+        firebase_uid: row.firebase_uid,
+        company_name: row.company_name,
+        contact_email: row.contact_email,
+        tier: row.tier as DealerTier,
+        is_active: row.is_active,
+        created_at: row.created_at.toISOString(),
+        updated_at: row.updated_at.toISOString()
+      };
+    } finally {
+      client.release();
+    }
+  }
+}

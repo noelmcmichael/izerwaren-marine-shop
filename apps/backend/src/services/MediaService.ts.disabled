@@ -1,0 +1,323 @@
+import { prisma as db } from '@izerwaren/database';
+import { Prisma } from '@prisma/client';
+
+export class MediaService {
+  /**
+   * Get media files with filtering and pagination
+   */
+  static async getMedia(options: { type?: 'image' | 'pdf'; productId?: string; page?: number; limit?: number }) {
+    const { type, productId, page = 1, limit = 20 } = options;
+    const skip = (page - 1) * limit;
+
+    if (type === 'image') {
+      return this.getImages({ productId, page, limit });
+    } else if (type === 'pdf') {
+      return this.getPdfs({ productId, page, limit });
+    } else {
+      return this.getMediaSummary();
+    }
+  }
+
+  /**
+   * Get product images with filtering
+   */
+  static async getImages(options: { productId?: string; page?: number; limit?: number; isPrimary?: boolean }) {
+    const { productId, page = 1, limit = 20, isPrimary } = options;
+    const skip = (page - 1) * limit;
+
+    const where: Prisma.ProductImageWhereInput = {};
+
+    if (productId) {
+      where.productId = productId;
+    }
+
+    if (isPrimary !== undefined) {
+      where.isPrimary = isPrimary;
+    }
+
+    const [images, total] = await Promise.all([
+      db.productImage.findMany({
+        where,
+        include: {
+          product: {
+            select: { id: true, title: true, sku: true },
+          },
+        },
+        skip,
+        take: limit,
+        orderBy: [{ isPrimary: 'desc' }, { imageOrder: 'asc' }],
+      }),
+      db.productImage.count({ where }),
+    ]);
+
+    return {
+      data: images,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit),
+        hasNextPage: page < Math.ceil(total / limit),
+        hasPreviousPage: page > 1,
+      },
+    };
+  }
+
+  /**
+   * Get PDF files with filtering
+   */
+  static async getPdfs(options: { productId?: string; page?: number; limit?: number }) {
+    const { productId, page = 1, limit = 20 } = options;
+    const skip = (page - 1) * limit;
+
+    const where: Prisma.ProductCatalogWhereInput = {};
+
+    if (productId) {
+      where.productId = productId;
+    }
+
+    const [pdfs, total] = await Promise.all([
+      db.productCatalog.findMany({
+        where,
+        include: {
+          product: {
+            select: { id: true, title: true, sku: true },
+          },
+        },
+        skip,
+        take: limit,
+        orderBy: { id: 'desc' },
+      }),
+      db.productCatalog.count({ where }),
+    ]);
+
+    return {
+      data: pdfs,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit),
+        hasNextPage: page < Math.ceil(total / limit),
+        hasPreviousPage: page > 1,
+      },
+    };
+  }
+
+  /**
+   * Get media summary statistics
+   */
+  static async getMediaSummary() {
+    const [
+      totalImages,
+      totalPdfs,
+      primaryImages,
+      galleryImages,
+      imagesByProduct,
+      pdfsByProduct,
+      largestImageFiles,
+      largestPdfFiles,
+    ] = await Promise.all([
+      db.productImage.count(),
+      db.productCatalog.count(),
+      db.productImage.count({ where: { isPrimary: true } }),
+      db.productImage.count({ where: { isPrimary: false } }),
+      db.productImage.groupBy({
+        by: ['productId'],
+        _count: { id: true },
+        orderBy: { _count: { id: 'desc' } },
+        take: 10,
+      }),
+      db.productCatalog.groupBy({
+        by: ['productId'],
+        _count: { id: true },
+        orderBy: { _count: { id: 'desc' } },
+        take: 10,
+      }),
+      db.productImage.findMany({
+        select: {
+          id: true,
+          localPath: true,
+          product: {
+            select: { title: true, sku: true },
+          },
+        },
+        orderBy: { fileSize: 'desc' },
+        take: 5,
+      }),
+      db.productCatalog.findMany({
+        select: {
+          id: true,
+          filename: true,
+          fileSize: true,
+          product: {
+            select: { title: true, sku: true },
+          },
+        },
+        orderBy: { fileSize: 'desc' },
+        take: 5,
+      }),
+    ]);
+
+    return {
+      data: {
+        images: {
+          total: totalImages,
+          primary: primaryImages,
+          gallery: galleryImages,
+          topProductsByImages: imagesByProduct.map(item => ({
+            productId: item.productId,
+            count: item._count.id,
+          })),
+          largestFiles: largestImageFiles,
+        },
+        pdfs: {
+          total: totalPdfs,
+          topProductsByPdfs: pdfsByProduct.map(item => ({
+            productId: item.productId,
+            count: item._count.id,
+          })),
+          largestFiles: largestPdfFiles,
+        },
+        summary: {
+          totalMediaFiles: totalImages + totalPdfs,
+          averageImagesPerProduct: primaryImages > 0 ? Math.round((totalImages / primaryImages) * 100) / 100 : 0,
+          storageDistribution: {
+            tier1_shopify: primaryImages,
+            tier2_cdn: galleryImages,
+            tier3_secure: totalPdfs,
+          },
+        },
+      },
+    };
+  }
+
+  /**
+   * Get single image with details
+   */
+  static async getImageById(id: string) {
+    const image = await db.productImage.findUnique({
+      where: { id },
+      include: {
+        product: {
+          select: { id: true, title: true, sku: true },
+        },
+      },
+    });
+
+    if (!image) {
+      throw new Error(`Image with ID ${id} not found`);
+    }
+
+    return image;
+  }
+
+  /**
+   * Get single PDF with details
+   */
+  static async getPdfById(id: string) {
+    const pdf = await db.productCatalog.findUnique({
+      where: { id },
+      include: {
+        product: {
+          select: { id: true, title: true, sku: true },
+        },
+      },
+    });
+
+    if (!pdf) {
+      throw new Error(`PDF with ID ${id} not found`);
+    }
+
+    return pdf;
+  }
+
+  /**
+   * Generate CDN URLs for different image sizes
+   */
+  static generateImageUrls(image: any) {
+    const baseUrl = image.imageUrl;
+    const extension = baseUrl.split('.').pop();
+    const baseName = baseUrl.replace(`.${extension}`, '');
+
+    return {
+      original: baseUrl,
+      thumbnail: `${baseName}_thumb.${extension}`,
+      medium: `${baseName}_medium.${extension}`,
+      large: `${baseName}_large.${extension}`,
+      shopify: image.shopifyImageId ? `https://cdn.shopify.com/s/files/1/.../${image.shopifyImageId}` : null,
+    };
+  }
+
+  /**
+   * Get images for a specific product with gallery organization
+   */
+  static async getProductImageGallery(productId: string) {
+    const images = await db.productImage.findMany({
+      where: { productId },
+      orderBy: [{ isPrimary: 'desc' }, { imageOrder: 'asc' }, { createdAt: 'desc' }],
+    });
+
+    const primaryImage = images.find(img => img.isPrimary);
+    const galleryImages = images.filter(img => !img.isPrimary);
+
+    return {
+      primary: primaryImage
+        ? {
+            ...primaryImage,
+            urls: this.generateImageUrls(primaryImage),
+          }
+        : null,
+      gallery: galleryImages.map(img => ({
+        ...img,
+        urls: this.generateImageUrls(img),
+      })),
+      total: images.length,
+    };
+  }
+
+  /**
+   * Get secure PDF access URL (for B2B customers)
+   */
+  static async getSecurePdfUrl(pdfId: string, customerId?: string) {
+    const pdf = await db.productCatalog.findUnique({
+      where: { id: pdfId },
+      include: {
+        product: true,
+      },
+    });
+
+    if (!pdf) {
+      throw new Error(`PDF with ID ${pdfId} not found`);
+    }
+
+    // In production, this would generate a signed URL with expiration
+    // and check customer permissions
+    const secureUrl = `${pdf.imageUrl}?token=${this.generateAccessToken(pdfId, customerId)}`;
+
+    return {
+      id: pdf.id,
+      filename: pdf.filename,
+      title: pdf.title,
+      secureUrl,
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 hours
+      product: pdf.product,
+    };
+  }
+
+  /**
+   * Generate access token for secure PDF access
+   */
+  private static generateAccessToken(pdfId: string, customerId?: string): string {
+    // In production, this would use JWT or similar secure token
+    const payload = {
+      pdfId,
+      customerId,
+      expiresAt: Date.now() + 24 * 60 * 60 * 1000,
+    };
+
+    return Buffer.from(JSON.stringify(payload)).toString('base64');
+  }
+}
+
+export default MediaService;

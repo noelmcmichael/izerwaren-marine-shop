@@ -1,0 +1,311 @@
+import { prisma as db } from '@izerwaren/database';
+import config from '../lib/config';
+import { Router } from 'express';
+import { z } from 'zod';
+
+import { validateRequest } from '../middleware/validation';
+
+const router = Router();
+
+// Validation schemas
+const mediaParamsSchema = z.object({
+  id: z.string().min(1),
+});
+
+const mediaQuerySchema = z.object({
+  type: z.enum(['image', 'pdf']).optional(),
+  productId: z.string().min(1).optional(),
+  page: z
+    .string()
+    .optional()
+    .transform(val => (val ? parseInt(val, 10) : 1)),
+  limit: z
+    .string()
+    .optional()
+    .transform(val => (val ? parseInt(val, 10) : 20)),
+});
+
+/**
+ * Get all media files with filtering
+ * GET /api/v1/media
+ */
+router.get('/', validateRequest({ query: mediaQuerySchema }), async (req, res) => {
+  try {
+    const parsedQuery = mediaQuerySchema.parse(req.query);
+    const { type, productId, page, limit } = parsedQuery;
+
+    const skip = (page - 1) * limit;
+
+    if (type === 'image') {
+      // Get product images
+      const where: Record<string, unknown> = {};
+      if (productId) {
+        where.productId = productId;
+      }
+
+      const [images, total] = await Promise.all([
+        db.productImage.findMany({
+          where,
+          include: {
+            product: {
+              select: { id: true, title: true, sku: true },
+            },
+          },
+          skip,
+          take: limit,
+          orderBy: [{ isPrimary: 'desc' }, { imageOrder: 'asc' }],
+        }),
+        db.productImage.count({ where }),
+      ]);
+
+      const totalPages = Math.ceil(total / limit);
+
+      res.json({
+        data: images,
+        pagination: {
+          page,
+          limit,
+          total,
+          totalPages,
+          hasNextPage: page < totalPages,
+          hasPreviousPage: page > 1,
+        },
+      });
+    } else if (type === 'pdf') {
+      // Get PDF files
+      const where: Record<string, unknown> = {};
+      if (productId) {
+        where.productId = productId;
+      }
+
+      const [pdfs, total] = await Promise.all([
+        db.productCatalog.findMany({
+          where,
+          include: {
+            product: {
+              select: { id: true, title: true, sku: true },
+            },
+          },
+          skip,
+          take: limit,
+          orderBy: { id: 'desc' },
+        }),
+        db.productCatalog.count({ where }),
+      ]);
+
+      const totalPages = Math.ceil(total / limit);
+
+      res.json({
+        data: pdfs,
+        pagination: {
+          page,
+          limit,
+          total,
+          totalPages,
+          hasNextPage: page < totalPages,
+          hasPreviousPage: page > 1,
+        },
+      });
+    } else {
+      // Get all media types summary
+      const [imageCount, pdfCount] = await Promise.all([db.productImage.count(), db.productCatalog.count()]);
+
+      res.json({
+        data: {
+          summary: {
+            images: imageCount,
+            pdfs: pdfCount,
+            total: imageCount + pdfCount,
+          },
+        },
+      });
+    }
+  } catch (error) {
+    console.error('Error fetching media:', error);
+    res.status(500).json({
+      error: 'Failed to fetch media',
+      message: config.isDevelopment ? (error as Error).message : undefined,
+    });
+  }
+});
+
+/**
+ * Get specific image by ID
+ * GET /api/v1/media/images/:id
+ */
+router.get('/images/:id', validateRequest({ params: mediaParamsSchema }), async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const image = await db.productImage.findUnique({
+      where: { id },
+      include: {
+        product: {
+          select: { id: true, title: true, sku: true },
+        },
+      },
+    });
+
+    if (!image) {
+      return res.status(404).json({
+        error: 'Image not found',
+        message: `Image with ID ${id} does not exist`,
+      });
+    }
+
+    res.json({ data: image });
+  } catch (error) {
+    console.error('Error fetching image:', error);
+    res.status(500).json({
+      error: 'Failed to fetch image',
+      message: config.isDevelopment ? (error as Error).message : undefined,
+    });
+  }
+});
+
+/**
+ * Get specific PDF by ID
+ * GET /api/v1/media/pdfs/:id
+ */
+router.get('/pdfs/:id', validateRequest({ params: mediaParamsSchema }), async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const pdf = await db.productCatalog.findUnique({
+      where: { id },
+      include: {
+        product: {
+          select: { id: true, title: true, sku: true },
+        },
+      },
+    });
+
+    if (!pdf) {
+      return res.status(404).json({
+        error: 'PDF not found',
+        message: `PDF with ID ${id} does not exist`,
+      });
+    }
+
+    res.json({ data: pdf });
+  } catch (error) {
+    console.error('Error fetching PDF:', error);
+    res.status(500).json({
+      error: 'Failed to fetch PDF',
+      message: config.isDevelopment ? (error as Error).message : undefined,
+    });
+  }
+});
+
+/**
+ * Get media statistics
+ * GET /api/v1/media/stats
+ */
+router.get('/stats', async (req, res) => {
+  try {
+    const [totalImages, totalPdfs, primaryImages, galleryImages, imagesByProduct, pdfsByProduct] = await Promise.all([
+      db.productImage.count(),
+      db.productCatalog.count(),
+      db.productImage.count({ where: { isPrimary: true } }),
+      db.productImage.count({ where: { isPrimary: false } }),
+      db.productImage.groupBy({
+        by: ['productId'],
+        _count: { id: true },
+        orderBy: { _count: { id: 'desc' } },
+        take: 10,
+      }),
+      db.productCatalog.groupBy({
+        by: ['productId'],
+        _count: { id: true },
+        orderBy: { _count: { id: 'desc' } },
+        take: 10,
+      }),
+    ]);
+
+    const stats = {
+      images: {
+        total: totalImages,
+        primary: primaryImages,
+        gallery: galleryImages,
+        topProductsByImages: imagesByProduct.map(item => ({
+          productId: item.productId,
+          count: item._count.id,
+        })),
+      },
+      pdfs: {
+        total: totalPdfs,
+        topProductsByPdfs: pdfsByProduct.map(item => ({
+          productId: item.productId,
+          count: item._count.id,
+        })),
+      },
+      summary: {
+        totalMediaFiles: totalImages + totalPdfs,
+        averageImagesPerProduct: totalImages > 0 ? Math.round((totalImages / primaryImages) * 100) / 100 : 0,
+      },
+    };
+
+    res.json({ data: stats });
+  } catch (error) {
+    console.error('Error fetching media stats:', error);
+    res.status(500).json({
+      error: 'Failed to fetch media statistics',
+      message: config.isDevelopment ? (error as Error).message : undefined,
+    });
+  }
+});
+
+/**
+ * Get CDN URLs for images (preparation for CDN integration)
+ * GET /api/v1/media/cdn/images/:id
+ */
+router.get('/cdn/images/:id', validateRequest({ params: mediaParamsSchema }), async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const image = await db.productImage.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        imageUrl: true,
+        localPath: true,
+        productId: true,
+        product: {
+          select: { id: true, sku: true },
+        },
+      },
+    });
+
+    if (!image) {
+      return res.status(404).json({
+        error: 'Image not found',
+      });
+    }
+
+    // Future: Generate CDN URLs based on storage tier
+    const cdnUrls = {
+      original: image.imageUrl || '',
+      thumbnail: image.imageUrl ? image.imageUrl.replace(/\.(jpg|jpeg|png|webp)$/i, '_thumb.$1') : '',
+      medium: image.imageUrl ? image.imageUrl.replace(/\.(jpg|jpeg|png|webp)$/i, '_medium.$1') : '',
+      large: image.imageUrl ? image.imageUrl.replace(/\.(jpg|jpeg|png|webp)$/i, '_large.$1') : '',
+      shopify: null, // shopifyImageId not in current schema
+    };
+
+    res.json({
+      data: {
+        id: image.id,
+        filename: image.localPath,
+        urls: cdnUrls,
+        product: image.product,
+      },
+    });
+  } catch (error) {
+    console.error('Error generating CDN URLs:', error);
+    res.status(500).json({
+      error: 'Failed to generate CDN URLs',
+      message: config.isDevelopment ? (error as Error).message : undefined,
+    });
+  }
+});
+
+export default router;

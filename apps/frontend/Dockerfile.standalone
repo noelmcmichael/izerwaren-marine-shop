@@ -1,0 +1,62 @@
+# Standalone Frontend Dockerfile for Next.js application
+# This Dockerfile builds only the frontend without monorepo dependencies
+
+FROM node:18-alpine AS base
+
+# Install dependencies for native modules
+RUN apk add --no-cache libc6-compat
+
+WORKDIR /app
+
+# Copy frontend package files
+COPY apps/frontend/package*.json ./
+COPY apps/frontend/.env.production ./.env.production
+
+# Install frontend dependencies only
+RUN npm ci
+
+# Copy frontend source code
+COPY apps/frontend/src ./src
+COPY apps/frontend/public ./public
+COPY apps/frontend/next.config.js ./
+COPY apps/frontend/tailwind.config.js ./
+COPY apps/frontend/postcss.config.js ./
+COPY apps/frontend/tsconfig.json ./
+COPY apps/frontend/next-env.d.ts ./
+
+# Build the frontend
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV NODE_ENV=production
+
+RUN npm run build
+
+# Production stage
+FROM node:18-alpine AS production
+
+RUN apk add --no-cache libc6-compat
+
+WORKDIR /app
+
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+
+# Create non-root user
+RUN addgroup -g 1001 -S nodejs
+RUN adduser -S nextjs -u 1001
+
+# Copy built application
+COPY --from=base --chown=nextjs:nodejs /app/.next/standalone ./
+COPY --from=base --chown=nextjs:nodejs /app/.next/static ./.next/static
+COPY --from=base --chown=nextjs:nodejs /app/public ./public
+
+USER nextjs
+
+EXPOSE 3000
+
+ENV PORT=3000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD node healthcheck.js
+
+CMD ["server.js"]

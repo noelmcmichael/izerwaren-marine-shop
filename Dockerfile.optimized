@@ -1,0 +1,126 @@
+# Optimized Multi-Service Dockerfile for Izerwaren Monorepo
+# Builds both frontend and backend efficiently with proper caching
+
+FROM node:18-alpine AS base
+
+# Install dependencies once for better caching
+RUN apk add --no-cache \
+    libc6-compat \
+    openssl \
+    && rm -rf /var/cache/apk/*
+
+WORKDIR /app
+
+# Copy root package files for dependency resolution
+COPY package*.json turbo.json ./
+
+# Copy all package.json files to establish workspace structure
+COPY apps/frontend/package*.json ./apps/frontend/
+COPY apps/backend/package*.json ./apps/backend/
+COPY packages/database/package*.json ./packages/database/
+COPY packages/shared/package*.json ./packages/shared/
+COPY packages/shopify-integration/package*.json ./packages/shopify-integration/
+
+# Install all dependencies with better caching
+RUN npm ci --only=production=false
+
+# === FRONTEND BUILD ===
+FROM base AS frontend-builder
+
+# Copy source code
+COPY . .
+
+# Generate Prisma client
+RUN npm run db:generate
+
+# Build frontend with optimizations
+ENV NODE_ENV=production \
+    NEXT_TELEMETRY_DISABLED=1
+
+RUN npm run build --workspace=@izerwaren/frontend
+
+# === BACKEND BUILD ===
+FROM base AS backend-builder
+
+# Copy source code
+COPY . .
+
+# Generate Prisma client
+RUN npm run db:generate
+
+# Build backend
+RUN npm run build --workspace=@izerwaren/backend
+
+# === PRODUCTION FRONTEND ===
+FROM node:18-alpine AS frontend-production
+
+RUN apk add --no-cache \
+    openssl \
+    && addgroup -g 1001 -S nodejs \
+    && adduser -S nextjs -u 1001 -G nodejs
+
+WORKDIR /app
+
+ENV NODE_ENV=production \
+    NEXT_TELEMETRY_DISABLED=1 \
+    PORT=3000
+
+# Copy built frontend
+COPY --from=frontend-builder --chown=nextjs:nodejs /app/apps/frontend/.next/standalone ./
+COPY --from=frontend-builder --chown=nextjs:nodejs /app/apps/frontend/.next/static ./apps/frontend/.next/static
+COPY --from=frontend-builder --chown=nextjs:nodejs /app/apps/frontend/public ./apps/frontend/public
+COPY --from=frontend-builder --chown=nextjs:nodejs /app/node_modules/.prisma ./node_modules/.prisma
+
+USER nextjs
+
+EXPOSE 3000
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+  CMD node -e "require('http').get('http://localhost:3000/api/health', (res) => { \
+    process.exit(res.statusCode === 200 ? 0 : 1) \
+  }).on('error', () => process.exit(1))"
+
+CMD ["node", "apps/frontend/server.js"]
+
+# === PRODUCTION BACKEND ===
+FROM node:18-alpine AS backend-production
+
+RUN apk add --no-cache \
+    openssl \
+    && addgroup -g 1001 -S nodejs \
+    && adduser -S backend -u 1001 -G nodejs
+
+WORKDIR /app
+
+ENV NODE_ENV=production \
+    PORT=4000
+
+# Copy built backend
+COPY --from=backend-builder --chown=backend:nodejs /app/apps/backend/dist ./dist
+COPY --from=backend-builder --chown=backend:nodejs /app/node_modules ./node_modules
+COPY --from=backend-builder --chown=backend:nodejs /app/packages ./packages
+
+USER backend
+
+EXPOSE 4000
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+  CMD node -e "require('http').get('http://localhost:4000/api/v1/health', (res) => { \
+    process.exit(res.statusCode === 200 ? 0 : 1) \
+  }).on('error', () => process.exit(1))"
+
+CMD ["node", "dist/server.js"]
+
+# === DEVELOPMENT ===
+FROM base AS development
+
+# Copy all source code
+COPY . .
+
+# Generate Prisma client
+RUN npm run db:generate
+
+EXPOSE 3000 4000
+
+# Default to frontend dev server, but allow override
+CMD ["npm", "run", "dev"]

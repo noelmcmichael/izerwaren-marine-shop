@@ -1,0 +1,14 @@
+# Patch existing image with Shopify credentials
+FROM gcr.io/noelmc/izerwaren-revival:api-fallback-fix-amd64
+
+# Set Shopify environment variables
+ENV NEXT_PUBLIC_SHOPIFY_STORE_DOMAIN=izerw-marine.myshopify.com
+ENV NEXT_PUBLIC_SHOPIFY_STOREFRONT_ACCESS_TOKEN=0ab05ecb92628e1877d86e67e84b4034
+ENV SHOPIFY_ADMIN_ACCESS_TOKEN=${SHOPIFY_ADMIN_ACCESS_TOKEN}
+ENV SHOPIFY_API_KEY=de453a5bc224c33774b277db1eaefb5b
+ENV SHOPIFY_API_SECRET=0fa667c90ffb68978b78dfdc46463bd2
+ENV NEXT_PUBLIC_ENVIRONMENT=production
+ENV NEXT_PUBLIC_DEV_MODE=false
+
+# The existing image already has the app built, we're just adding env vars
+CMD ["server.js"]

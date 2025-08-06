@@ -1,0 +1,401 @@
+'use client';
+
+import React, { useState, useEffect, useCallback } from 'react';
+import { Grid3X3, List, Search, Filter, ChevronDown, Package } from 'lucide-react';
+import Link from 'next/link';
+
+interface Product {
+  id: string;
+  title: string;
+  description?: string;
+  sku: string;
+  price?: string;
+  availability?: string;
+  images: Array<{
+    id: string;
+    url: string;
+    altText?: string;
+    isPrimary: boolean;
+  }>;
+  shopifyVariants: Array<{
+    id: string;
+    sku?: string;
+    inventoryQty?: number;
+  }>;
+}
+
+interface ProductsResponse {
+  data: Product[];
+  pagination: {
+    page: number;
+    limit: number;
+    total: number;
+    totalPages: number;
+    hasNextPage: boolean;
+    hasPreviousPage: boolean;
+  };
+}
+
+type ViewMode = 'grid' | 'list';
+type SortOption = 'name' | 'price' | 'newest' | 'popularity';
+
+export default function CatalogPage() {
+  const [products, setProducts] = useState<Product[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<ViewMode>('grid');
+  const [searchTerm, setSearchTerm] = useState('');
+  const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
+  const [selectedSubCategory, setSelectedSubCategory] = useState<string | null>(null);
+  const [sortBy, setSortBy] = useState<SortOption>('name');
+  const [showFilters, setShowFilters] = useState(false);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pagination, setPagination] = useState<ProductsResponse['pagination'] | null>(null);
+
+  const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+
+  // Fetch products from backend API
+  const fetchProducts = useCallback(
+    async (
+      page: number = 1,
+      search?: string,
+      ownerCategory?: string | null,
+      subCategory?: string | null,
+      sort?: SortOption
+    ) => {
+      console.log('🔍 Fetching products:', { page, search, ownerCategory, subCategory, sort });
+      setLoading(true);
+      setError(null);
+
+      try {
+        const params = new URLSearchParams();
+        params.append('page', page.toString());
+        params.append('limit', '24'); // Good number for grid layout
+        
+        if (search) params.append('search', search);
+        if (subCategory) {
+          params.append('subCategory', subCategory);
+        } else if (ownerCategory) {
+          params.append('ownerCategory', ownerCategory);
+        }
+        if (sort) params.append('sortBy', sort);
+        params.append('status', 'active'); // Only show active products
+
+        const url = `${API_BASE_URL}/api/v1/products?${params.toString()}`;
+        console.log('🌐 API URL:', url);
+        const response = await fetch(url);
+
+        if (!response.ok) {
+          throw new Error('Failed to fetch products');
+        }
+
+        const result: ProductsResponse = await response.json();
+        
+        // Transform API response to match frontend interface
+        const transformedProducts: Product[] = result.data.map((apiProduct: any) => ({
+          id: apiProduct.id,
+          title: apiProduct.title,
+          description: apiProduct.description,
+          sku: apiProduct.sku,
+          price: apiProduct.price,
+          availability: apiProduct.availability,
+          images: apiProduct.images?.map((img: any) => ({
+            id: img.id,
+            url: img.imageUrl || img.url,
+            altText: img.altText,
+            isPrimary: img.isPrimary
+          })) || [],
+          shopifyVariants: apiProduct.shopifyVariants || []
+        }));
+
+        setProducts(transformedProducts);
+        setPagination(result.pagination);
+        console.log(`✅ Loaded ${transformedProducts.length} products`);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Failed to fetch products');
+        console.error('Error fetching products:', err);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [API_BASE_URL]
+  );
+
+  // Initial load and when filters change
+  useEffect(() => {
+    fetchProducts(currentPage, searchTerm, selectedCategory, selectedSubCategory, sortBy);
+  }, [fetchProducts, currentPage, searchTerm, selectedCategory, selectedSubCategory, sortBy]);
+
+  // Handle search input
+  const handleSearchChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setSearchTerm(e.target.value);
+    setCurrentPage(1); // Reset to first page on search
+  };
+
+  // Handle category selection
+  const handleCategoryChange = (categoryName: string | null) => {
+    setSelectedCategory(categoryName);
+    setSelectedSubCategory(null); // Clear sub-category when changing main category
+    setCurrentPage(1);
+  };
+
+  const handleSubCategoryChange = (subCategoryName: string | null) => {
+    setSelectedSubCategory(subCategoryName);
+    setCurrentPage(1);
+  };
+
+  // Handle pagination
+  const handlePageChange = (page: number) => {
+    setCurrentPage(page);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  return (
+    <div className="min-h-screen bg-gray-50">
+      {/* Header */}
+      <div className="bg-white shadow-sm border-b">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+          <div className="py-6">
+            <div className="flex items-center justify-between">
+              <div>
+                <h1 className="text-3xl font-bold text-gray-900">Product Catalog</h1>
+                <p className="mt-1 text-sm text-gray-500">
+                  Browse our complete selection of marine hardware and industrial supplies
+                </p>
+              </div>
+              <div className="flex items-center space-x-4">
+                {/* Search Bar */}
+                <div className="relative">
+                  <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 h-4 w-4" />
+                  <input
+                    type="text"
+                    placeholder="Search products..."
+                    value={searchTerm}
+                    onChange={handleSearchChange}
+                    className="pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent w-64"
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        <div className="flex flex-col lg:flex-row gap-8">
+          {/* Filter Sidebar */}
+          <div className="lg:w-1/4">
+            <div className="lg:hidden mb-4">
+              <button
+                onClick={() => setShowFilters(!showFilters)}
+                className="flex items-center justify-between w-full px-4 py-2 bg-white border border-gray-300 rounded-lg shadow-sm"
+              >
+                <span className="flex items-center">
+                  <Filter className="h-4 w-4 mr-2" />
+                  Filters
+                </span>
+                <ChevronDown className={`h-4 w-4 transform ${showFilters ? 'rotate-180' : ''}`} />
+              </button>
+            </div>
+            
+            <div className={`${showFilters ? 'block' : 'hidden'} lg:block`}>
+              <FilterSidebar
+                selectedCategory={selectedCategory}
+                selectedSubCategory={selectedSubCategory}
+                onCategoryChange={handleCategoryChange}
+                onSubCategoryChange={handleSubCategoryChange}
+              />
+            </div>
+          </div>
+
+          {/* Main Content */}
+          <div className="lg:w-3/4">
+            {/* Toolbar */}
+            <div className="flex items-center justify-between mb-6 bg-white p-4 rounded-lg shadow-sm">
+              <div className="flex items-center space-x-4">
+                {/* Results count */}
+                <div className="text-sm text-gray-600">
+                  {pagination && (
+                    <>
+                      Showing {((pagination.page - 1) * pagination.limit) + 1}-
+                      {Math.min(pagination.page * pagination.limit, pagination.total)} of {pagination.total} products
+                    </>
+                  )}
+                </div>
+                
+                {/* Active filters */}
+                {(selectedCategory || selectedSubCategory || searchTerm) && (
+                  <div className="flex items-center space-x-2">
+                    {selectedCategory && (
+                      <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
+                        {selectedCategory}
+                      </span>
+                    )}
+                    {selectedSubCategory && (
+                      <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
+                        {selectedSubCategory}
+                      </span>
+                    )}
+                    {searchTerm && (
+                      <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
+                        "{searchTerm}"
+                      </span>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <div className="flex items-center space-x-4">
+                {/* Sort dropdown */}
+                <select
+                  value={sortBy}
+                  onChange={(e) => setSortBy(e.target.value as SortOption)}
+                  className="border border-gray-300 rounded-md px-3 py-1.5 text-sm"
+                >
+                  <option value="name">Sort by Name</option>
+                  <option value="price">Sort by Price</option>
+                  <option value="newest">Newest First</option>
+                  <option value="popularity">Most Popular</option>
+                </select>
+
+                {/* View mode toggle */}
+                <div className="flex rounded-md border border-gray-300">
+                  <button
+                    onClick={() => setViewMode('grid')}
+                    className={`p-2 ${
+                      viewMode === 'grid'
+                        ? 'bg-blue-50 text-blue-600 border-r border-gray-300'
+                        : 'text-gray-400 hover:text-gray-600'
+                    }`}
+                  >
+                    <Grid3X3 className="h-4 w-4" />
+                  </button>
+                  <button
+                    onClick={() => setViewMode('list')}
+                    className={`p-2 ${
+                      viewMode === 'list'
+                        ? 'bg-blue-50 text-blue-600'
+                        : 'text-gray-400 hover:text-gray-600'
+                    }`}
+                  >
+                    <List className="h-4 w-4" />
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* Product Display */}
+            {loading ? (
+              <div className="flex items-center justify-center py-12">
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+                <span className="ml-2 text-gray-600">Loading products...</span>
+              </div>
+            ) : error ? (
+              <div className="text-center py-12">
+                <Package className="mx-auto h-12 w-12 text-gray-400" />
+                <h3 className="mt-2 text-sm font-medium text-gray-900">Error loading products</h3>
+                <p className="mt-1 text-sm text-gray-500">{error}</p>
+                <div className="mt-6">
+                  <button
+                    onClick={() => fetchProducts(currentPage, searchTerm, selectedCategory, selectedSubCategory, sortBy)}
+                    className="inline-flex items-center px-4 py-2 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700"
+                  >
+                    Try Again
+                  </button>
+                </div>
+              </div>
+            ) : products.length === 0 ? (
+              <div className="text-center py-12">
+                <Package className="mx-auto h-12 w-12 text-gray-400" />
+                <h3 className="mt-2 text-sm font-medium text-gray-900">No products found</h3>
+                <p className="mt-1 text-sm text-gray-500">
+                  Try adjusting your filters or search terms
+                </p>
+              </div>
+            ) : (
+              <ProductGrid products={products} viewMode={viewMode} />
+            )}
+
+            {/* Pagination */}
+            {pagination && pagination.totalPages > 1 && (
+              <div className="mt-8 flex items-center justify-between">
+                <div className="flex-1 flex justify-between sm:hidden">
+                  <button
+                    onClick={() => handlePageChange(currentPage - 1)}
+                    disabled={!pagination.hasPreviousPage}
+                    className="relative inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    Previous
+                  </button>
+                  <button
+                    onClick={() => handlePageChange(currentPage + 1)}
+                    disabled={!pagination.hasNextPage}
+                    className="ml-3 relative inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    Next
+                  </button>
+                </div>
+                
+                <div className="hidden sm:flex-1 sm:flex sm:items-center sm:justify-between">
+                  <div>
+                    <p className="text-sm text-gray-700">
+                      Page <span className="font-medium">{pagination.page}</span> of{' '}
+                      <span className="font-medium">{pagination.totalPages}</span>
+                    </p>
+                  </div>
+                  <div>
+                    <nav className="relative z-0 inline-flex rounded-md shadow-sm -space-x-px">
+                      <button
+                        onClick={() => handlePageChange(currentPage - 1)}
+                        disabled={!pagination.hasPreviousPage}
+                        className="relative inline-flex items-center px-2 py-2 rounded-l-md border border-gray-300 bg-white text-sm font-medium text-gray-500 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        Previous
+                      </button>
+                      
+                      {/* Page numbers */}
+                      {Array.from({ length: Math.min(pagination.totalPages, 7) }, (_, i) => {
+                        let pageNum;
+                        if (pagination.totalPages <= 7) {
+                          pageNum = i + 1;
+                        } else if (pagination.page <= 4) {
+                          pageNum = i + 1;
+                        } else if (pagination.page >= pagination.totalPages - 3) {
+                          pageNum = pagination.totalPages - 6 + i;
+                        } else {
+                          pageNum = pagination.page - 3 + i;
+                        }
+                        
+                        return (
+                          <button
+                            key={pageNum}
+                            onClick={() => handlePageChange(pageNum)}
+                            className={`relative inline-flex items-center px-4 py-2 border text-sm font-medium ${
+                              pageNum === pagination.page
+                                ? 'z-10 bg-blue-50 border-blue-500 text-blue-600'
+                                : 'bg-white border-gray-300 text-gray-500 hover:bg-gray-50'
+                            }`}
+                          >
+                            {pageNum}
+                          </button>
+                        );
+                      })}
+                      
+                      <button
+                        onClick={() => handlePageChange(currentPage + 1)}
+                        disabled={!pagination.hasNextPage}
+                        className="relative inline-flex items-center px-2 py-2 rounded-r-md border border-gray-300 bg-white text-sm font-medium text-gray-500 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        Next
+                      </button>
+                    </nav>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}

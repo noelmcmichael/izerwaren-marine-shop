@@ -1,0 +1,212 @@
+{
+  "sentry_alert_rules": [
+    {
+      "name": "Critical Errors - Immediate Alert",
+      "conditions": [
+        {
+          "id": "sentry.rules.conditions.level.LevelCondition",
+          "level": "50"
+        },
+        {
+          "id": "sentry.rules.conditions.tagged_event.TaggedEventCondition",
+          "key": "severity",
+          "match": "eq",
+          "value": "critical"
+        }
+      ],
+      "actions": [
+        {
+          "id": "sentry.rules.actions.notify_event_service.SlackNotifyServiceAction",
+          "channel": "#alerts-critical",
+          "tags": ["severity:critical", "component", "operation"]
+        },
+        {
+          "id": "sentry.rules.actions.notify_event_service.PagerDutyNotifyServiceAction",
+          "service": "production-izerwaren"
+        }
+      ],
+      "actionMatch": "all",
+      "frequency": 5
+    },
+    {
+      "name": "High Error Rate",
+      "conditions": [
+        {
+          "id": "sentry.rules.conditions.event_frequency.EventFrequencyCondition",
+          "value": 10,
+          "interval": "5m"
+        }
+      ],
+      "actions": [
+        {
+          "id": "sentry.rules.actions.notify_event_service.SlackNotifyServiceAction",
+          "channel": "#alerts-errors",
+          "tags": ["component", "correlationId"]
+        }
+      ],
+      "actionMatch": "all",
+      "frequency": 60
+    },
+    {
+      "name": "Health Check Failures",
+      "conditions": [
+        {
+          "id": "sentry.rules.conditions.tagged_event.TaggedEventCondition",
+          "key": "component",
+          "match": "eq",
+          "value": "health-check"
+        },
+        {
+          "id": "sentry.rules.conditions.level.LevelCondition",
+          "level": "40"
+        }
+      ],
+      "actions": [
+        {
+          "id": "sentry.rules.actions.notify_event_service.SlackNotifyServiceAction",
+          "channel": "#ops-monitoring",
+          "tags": ["component", "operation", "correlationId"]
+        }
+      ],
+      "actionMatch": "all",
+      "frequency": 30
+    },
+    {
+      "name": "Payment Processing Errors",
+      "conditions": [
+        {
+          "id": "sentry.rules.conditions.tagged_event.TaggedEventCondition",
+          "key": "component",
+          "match": "contains",
+          "value": "payment"
+        },
+        {
+          "id": "sentry.rules.conditions.level.LevelCondition",
+          "level": "40"
+        }
+      ],
+      "actions": [
+        {
+          "id": "sentry.rules.actions.notify_event_service.SlackNotifyServiceAction",
+          "channel": "#alerts-payments",
+          "tags": ["component", "operation", "correlationId", "userId"]
+        },
+        {
+          "id": "sentry.rules.actions.notify_event_service.EmailNotifyAction",
+          "targetType": "Team",
+          "targetIdentifier": "business-ops"
+        }
+      ],
+      "actionMatch": "all",
+      "frequency": 15
+    },
+    {
+      "name": "API Performance Degradation",
+      "conditions": [
+        {
+          "id": "sentry.rules.conditions.level.LevelCondition",
+          "level": "30"
+        },
+        {
+          "id": "sentry.rules.conditions.tagged_event.TaggedEventCondition",
+          "key": "operation",
+          "match": "contains",
+          "value": "api"
+        }
+      ],
+      "actions": [
+        {
+          "id": "sentry.rules.actions.notify_event_service.SlackNotifyServiceAction",
+          "channel": "#ops-performance",
+          "tags": ["component", "operation", "responseTime"]
+        }
+      ],
+      "actionMatch": "all",
+      "frequency": 120
+    }
+  ],
+  "notification_settings": {
+    "slack": {
+      "workspace": "izerwaren-team",
+      "channels": {
+        "#alerts-critical": {
+          "description": "Critical system failures requiring immediate attention",
+          "escalation": "pagerduty",
+          "business_hours_only": false
+        },
+        "#alerts-errors": {
+          "description": "High error rates and system issues",
+          "escalation": "team_lead",
+          "business_hours_only": false
+        },
+        "#ops-monitoring": {
+          "description": "Infrastructure and health monitoring",
+          "escalation": "dev_team",
+          "business_hours_only": true
+        },
+        "#alerts-payments": {
+          "description": "Payment processing and business-critical errors",
+          "escalation": "business_ops",
+          "business_hours_only": false
+        },
+        "#ops-performance": {
+          "description": "Performance monitoring and optimization alerts",
+          "escalation": "dev_team",
+          "business_hours_only": true
+        }
+      }
+    },
+    "pagerduty": {
+      "services": {
+        "production-izerwaren": {
+          "escalation_policy": "production-escalation",
+          "service_key": "ENV:PAGERDUTY_SERVICE_KEY"
+        }
+      }
+    },
+    "email": {
+      "teams": {
+        "business-ops": ["business@izerwaren.com"],
+        "dev-team": ["dev@izerwaren.com"],
+        "team-lead": ["lead@izerwaren.com"]
+      }
+    }
+  },
+  "escalation_procedures": {
+    "critical": {
+      "immediate": ["slack", "pagerduty"],
+      "15_minutes": ["sms", "phone_call"],
+      "30_minutes": ["escalate_to_manager"],
+      "1_hour": ["all_hands_notification"]
+    },
+    "high": {
+      "immediate": ["slack"],
+      "30_minutes": ["email"],
+      "2_hours": ["escalate_to_lead"]
+    },
+    "medium": {
+      "immediate": ["slack"],
+      "business_hours": ["email_summary"]
+    }
+  },
+  "suppression_rules": {
+    "maintenance_windows": {
+      "description": "Suppress alerts during scheduled maintenance",
+      "schedule": "manual_activation"
+    },
+    "known_issues": {
+      "description": "Suppress alerts for known issues being worked on",
+      "conditions": [
+        "tagged_event:known_issue:true"
+      ]
+    },
+    "test_environments": {
+      "description": "Suppress non-critical alerts from test environments",
+      "conditions": [
+        "environment:development",
+        "environment:staging"
+      ],
+      "excluded_severities": ["critical"]
+    }
+  }
+}

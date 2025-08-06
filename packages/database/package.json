@@ -1,0 +1,35 @@
+{
+  "name": "@izerwaren/database",
+  "version": "1.0.0",
+  "private": true,
+  "main": "./src/index.ts",
+  "scripts": {
+    "generate": "prisma generate",
+    "push": "prisma db push",
+    "migrate": "prisma migrate dev",
+    "seed": "tsx prisma/seed.ts",
+    "seed:b2b": "tsx prisma/seed-b2b-scenarios.ts",
+    "studio": "prisma studio",
+    "setup:full": "node scripts/migration-manager.js full-setup",
+    "setup:status": "node scripts/migration-manager.js status",
+    "setup:optimize": "node scripts/migration-manager.js optimize",
+    "setup:constraints": "node scripts/migration-manager.js constraints",
+    "validate": "node scripts/validate-final-setup.js",
+    "test:schema": "node scripts/test-schema-enhancements.js",
+    "reset": "prisma db push --force-reset && npm run seed:b2b",
+    "lint": "echo 'No linting needed for database package'",
+    "lint:fix": "echo 'No linting needed for database package'",
+    "type-check": "tsc --noEmit",
+    "format": "prettier --write src/",
+    "format:check": "prettier --check src/"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.7.0",
+    "@izerwaren/shared": "*"
+  },
+  "devDependencies": {
+    "prisma": "^5.7.0",
+    "tsx": "^4.20.3",
+    "typescript": "^5.3.0"
+  }
+}

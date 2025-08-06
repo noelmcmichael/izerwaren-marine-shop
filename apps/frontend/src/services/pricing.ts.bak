@@ -1,0 +1,300 @@
+/**
+ * B2B Pricing Services
+ * 
+ * Handles tier-based pricing, dealer discounts, and quantity pricing
+ * for the B2B customer authentication system.
+ */
+
+import { useQuery } from '@tanstack/react-query';
+
+import { queryKeys } from '../lib/react-query';
+import { useCustomerAuth, DealerTier } from '../providers/CustomerAuthProvider';
+import { config } from '../lib/config';
+
+export interface DealerPricing {
+  id: string;
+  dealer_id: string;
+  shopify_product_id: string;
+  shopify_variant_id?: string;
+  markdown_percent: number;
+  fixed_price?: number;
+  min_quantity: number;
+  max_quantity?: number;
+  is_active: boolean;
+  effective_from: string;
+  effective_until?: string;
+}
+
+export interface PricingResult {
+  base_price: number;
+  dealer_price: number;
+  discount_percent: number;
+  discount_amount: number;
+  tier: DealerTier;
+  pricing_type: 'standard' | 'tier_discount' | 'custom_pricing';
+  quantity_breaks?: QuantityBreak[];
+  minimum_quantity?: number;
+}
+
+export interface QuantityBreak {
+  min_quantity: number;
+  max_quantity?: number;
+  discount_percent: number;
+  price_per_unit: number;
+}
+
+/**
+ * Pricing API Functions
+ */
+export const pricingApi = {
+  // Get dealer-specific pricing for a product
+  getDealerPricing: async (
+    dealerId: string, 
+    shopifyProductId: string, 
+    variantId?: string
+  ): Promise<DealerPricing | null> => {
+    const params = new URLSearchParams({
+      dealer_id: dealerId,
+      shopify_product_id: shopifyProductId,
+      ...(variantId && { shopify_variant_id: variantId }),
+    });
+    
+    const response = await fetch(`${API_BASE_URL}/pricing/dealer?${params}`);
+    if (!response.ok) {
+      if (response.status === 404) return null;
+      throw new Error('Failed to fetch dealer pricing');
+    }
+    return response.json();
+  },
+
+  // Calculate pricing for a customer
+  calculateCustomerPrice: async (
+    customerId: string,
+    shopifyProductId: string,
+    basePrice: number,
+    quantity: number = 1,
+    variantId?: string
+  ): Promise<PricingResult> => {
+    const response = await fetch(`${API_BASE_URL}/pricing/calculate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        customer_id: customerId,
+        shopify_product_id: shopifyProductId,
+        shopify_variant_id: variantId,
+        base_price: basePrice,
+        quantity,
+      }),
+    });
+    
+    if (!response.ok) throw new Error('Failed to calculate pricing');
+    return response.json();
+  },
+
+  // Get quantity breaks for a product/customer
+  getQuantityBreaks: async (
+    customerId: string,
+    shopifyProductId: string,
+    variantId?: string
+  ): Promise<QuantityBreak[]> => {
+    const params = new URLSearchParams({
+      customer_id: customerId,
+      shopify_product_id: shopifyProductId,
+      ...(variantId && { shopify_variant_id: variantId }),
+    });
+    
+    const response = await fetch(`${API_BASE_URL}/pricing/quantity-breaks?${params}`);
+    if (!response.ok) throw new Error('Failed to fetch quantity breaks');
+    return response.json();
+  },
+};
+
+/**
+ * React Query Hooks for Pricing
+ */
+
+// Get dealer pricing for a specific product
+export function useDealerPricing(
+  dealerId: string | undefined,
+  shopifyProductId: string,
+  variantId?: string
+) {
+  return useQuery({
+    queryKey: ['dealerPricing', dealerId, shopifyProductId, variantId],
+    queryFn: () => dealerId 
+      ? pricingApi.getDealerPricing(dealerId, shopifyProductId, variantId)
+      : null,
+    enabled: !!dealerId && !!shopifyProductId,
+    staleTime: 1000 * 60 * 10, // 10 minutes
+  });
+}
+
+// Calculate customer pricing with tier logic
+export function useCustomerPricing(
+  shopifyProductId: string,
+  basePrice: number,
+  quantity: number = 1,
+  variantId?: string
+) {
+  const { customer, authenticated } = useCustomerAuth();
+  
+  return useQuery({
+    queryKey: ['customerPricing', customer?.profile?.id, shopifyProductId, variantId, quantity],
+    queryFn: () => customer?.profile?.id
+      ? pricingApi.calculateCustomerPrice(
+          customer.profile.id,
+          shopifyProductId,
+          basePrice,
+          quantity,
+          variantId
+        )
+      : generateStandardPricing(basePrice, quantity),
+    enabled: !!shopifyProductId && basePrice > 0,
+    staleTime: 1000 * 60 * 5, // 5 minutes
+  });
+}
+
+// Get quantity breaks for current customer
+export function useQuantityBreaks(
+  shopifyProductId: string,
+  variantId?: string
+) {
+  const { customer } = useCustomerAuth();
+  
+  return useQuery({
+    queryKey: ['quantityBreaks', customer?.profile?.id, shopifyProductId, variantId],
+    queryFn: () => customer?.profile?.id
+      ? pricingApi.getQuantityBreaks(customer.profile.id, shopifyProductId, variantId)
+      : [],
+    enabled: !!customer?.profile?.id && !!shopifyProductId,
+    staleTime: 1000 * 60 * 15, // 15 minutes
+  });
+}
+
+/**
+ * Pricing Calculation Utilities
+ */
+
+// Generate standard pricing for non-authenticated users
+function generateStandardPricing(basePrice: number, quantity: number): PricingResult {
+  return {
+    base_price: basePrice,
+    dealer_price: basePrice,
+    discount_percent: 0,
+    discount_amount: 0,
+    tier: 'STANDARD',
+    pricing_type: 'standard',
+    minimum_quantity: 1,
+  };
+}
+
+// Calculate tier-based discount
+export function calculateTierDiscount(tier: DealerTier, basePrice: number): number {
+  const discountMap: Record<DealerTier, number> = {
+    'STANDARD': 0,
+    'PREMIUM': 10,
+    'ENTERPRISE': 15,
+  };
+  
+  const discountPercent = discountMap[tier] || 0;
+  return basePrice * (discountPercent / 100);
+}
+
+// Apply quantity-based pricing
+export function applyQuantityPricing(
+  basePrice: number,
+  quantity: number,
+  quantityBreaks: QuantityBreak[]
+): { price: number; discount_percent: number } {
+  
+  // Find the applicable quantity break
+  const applicableBreak = quantityBreaks
+    .filter(qb => quantity >= qb.min_quantity)
+    .filter(qb => !qb.max_quantity || quantity <= qb.max_quantity)
+    .sort((a, b) => b.min_quantity - a.min_quantity)[0];
+  
+  if (applicableBreak) {
+    return {
+      price: applicableBreak.price_per_unit,
+      discount_percent: applicableBreak.discount_percent,
+    };
+  }
+  
+  return {
+    price: basePrice,
+    discount_percent: 0,
+  };
+}
+
+// Format price for display
+export function formatPrice(
+  price: number,
+  currency: string = 'USD',
+  locale: string = 'en-US'
+): string {
+  return new Intl.NumberFormat(locale, {
+    style: 'currency',
+    currency,
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(price);
+}
+
+// Calculate savings display
+export function calculateSavings(basePrice: number, dealerPrice: number): {
+  amount: number;
+  percent: number;
+  formatted_amount: string;
+  formatted_percent: string;
+} {
+  const amount = basePrice - dealerPrice;
+  const percent = basePrice > 0 ? (amount / basePrice) * 100 : 0;
+  
+  return {
+    amount,
+    percent,
+    formatted_amount: formatPrice(amount),
+    formatted_percent: `${percent.toFixed(1)}%`,
+  };
+}
+
+/**
+ * Higher-level pricing hook that combines customer auth and pricing logic
+ */
+export function useProductPricing(
+  shopifyProductId: string,
+  basePrice: number,
+  quantity: number = 1,
+  variantId?: string
+) {
+  const { customer, authenticated, getTierBenefits } = useCustomerAuth();
+  const pricingQuery = useCustomerPricing(shopifyProductId, basePrice, quantity, variantId);
+  const quantityBreaksQuery = useQuantityBreaks(shopifyProductId, variantId);
+  
+  const tierBenefits = getTierBenefits();
+  
+  return {
+    // Pricing data
+    pricing: pricingQuery.data,
+    quantityBreaks: quantityBreaksQuery.data || [],
+    
+    // Loading states
+    isLoading: pricingQuery.isLoading || quantityBreaksQuery.isLoading,
+    error: pricingQuery.error || quantityBreaksQuery.error,
+    
+    // Customer context
+    authenticated,
+    tier: customer?.profile?.tier || 'STANDARD',
+    tierBenefits,
+    
+    // Utility methods
+    refresh: () => {
+      pricingQuery.refetch();
+      quantityBreaksQuery.refetch();
+    },
+    
+    // Price display helpers
+    formatPrice: (price: number) => formatPrice(price),
+    calculateSavings: (dealerPrice: number) => calculateSavings(basePrice, dealerPrice),
+  };
+}

@@ -1,0 +1,61 @@
+version: '3.8'
+
+services:
+  # Frontend service (main production service)
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.simple
+      target: production
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+    env_file:
+      - .env.production
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000', (res) => process.exit(res.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # Development service (for local development)
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.simple
+      target: dependencies
+    ports:
+      - "3000:3000"
+      - "4000:4000"
+    environment:
+      - NODE_ENV=development
+    env_file:
+      - .env.local
+    volumes:
+      - .:/app
+      - /app/node_modules
+      - /app/.next
+    command: npm run dev
+    profiles:
+      - dev
+
+  # Database for local development
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: izerwaren_dev
+      POSTGRES_USER: izerwaren
+      POSTGRES_PASSWORD: development_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    profiles:
+      - dev
+
+volumes:
+  postgres_data:

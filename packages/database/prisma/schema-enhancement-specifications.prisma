@@ -1,0 +1,205 @@
+// Enhanced Technical Specifications Schema for Task 10
+// This file contains the enhanced schema design - will be integrated into main schema.prisma
+
+// Specification Categories with hierarchy and metadata
+model SpecificationCategory {
+  id               String       @id @default(cuid())
+  name             String       @unique // "Physical Dimensions", "Electrical", "Performance"
+  displayName      String       @map("display_name") // "Physical Dimensions", "Electrical Characteristics"
+  description      String?      // "Product physical measurements and dimensions"
+  parentId         String?      @map("parent_id") // For hierarchical categories
+  displayOrder     Int          @default(0) @map("display_order")
+  icon             String?      // "ruler", "zap", "activity" (icon identifier)
+  color            String?      // "#3B82F6" (hex color for UI theming)
+  isCollapsible    Boolean      @default(true) @map("is_collapsible")
+  isActiveByDefault Boolean     @default(true) @map("is_active_by_default")
+  importance       SpecImportance @default(STANDARD)
+  
+  // Marine hardware specific metadata
+  unitSystem       String?      @map("unit_system") // "metric", "imperial", "both"
+  applicableTypes  String[]     @map("applicable_types") // ["fastener", "cleat", "hardware"]
+  
+  createdAt        DateTime     @default(now()) @map("created_at")
+  updatedAt        DateTime     @updatedAt @map("updated_at")
+  
+  // Relationships
+  parent           SpecificationCategory? @relation("CategoryHierarchy", fields: [parentId], references: [id])
+  children         SpecificationCategory[] @relation("CategoryHierarchy")
+  specifications   TechnicalSpecification[]
+  
+  @@map("specification_categories")
+}
+
+// Enhanced Technical Specifications with full metadata support
+model TechnicalSpecification {
+  id               String       @id @default(cuid())
+  productId        String       @map("product_id")
+  categoryId       String       @map("category_id")
+  
+  // Core specification data
+  name             String       // "Overall Length", "Current Rating", "Breaking Force"
+  value            String       // "55.5", "7", "100-150"
+  unit             String?      // "mm", "A", "N"
+  dataType         SpecDataType @default(TEXT) @map("data_type")
+  
+  // Enhanced metadata
+  displayOrder     Int          @default(0) @map("display_order")
+  importance       SpecImportance @default(STANDARD)
+  isHighlighted    Boolean      @default(false) @map("is_highlighted")
+  isSearchable     Boolean      @default(true) @map("is_searchable")
+  isComparable     Boolean      @default(true) @map("is_comparable")
+  
+  // Numeric support for ranges and calculations
+  numericValue     Decimal?     @map("numeric_value") @db.Decimal(15,4)
+  numericMin       Decimal?     @map("numeric_min") @db.Decimal(15,4)
+  numericMax       Decimal?     @map("numeric_max") @db.Decimal(15,4)
+  
+  // Version control and change tracking
+  version          Int          @default(1)
+  lastModified     DateTime     @default(now()) @map("last_modified")
+  changeReason     String?      @map("change_reason")
+  
+  // Source and validation
+  sourceSystem     String?      @map("source_system") // "shopify", "legacy", "manual"
+  isValidated      Boolean      @default(false) @map("is_validated")
+  validatedBy      String?      @map("validated_by")
+  validatedAt      DateTime?    @map("validated_at")
+  
+  createdAt        DateTime     @default(now()) @map("created_at")
+  updatedAt        DateTime     @updatedAt @map("updated_at")
+  
+  // Relationships
+  product          Product      @relation(fields: [productId], references: [id], onDelete: Cascade)
+  category         SpecificationCategory @relation(fields: [categoryId], references: [id])
+  unitConversions  SpecificationUnitConversion[]
+  changeHistory    SpecificationChangeLog[]
+  
+  @@unique([productId, categoryId, name])
+  @@index([productId, categoryId])
+  @@index([categoryId, isSearchable])
+  @@index([importance, isHighlighted])
+  @@index([numericValue])
+  @@map("technical_specifications")
+}
+
+// Unit conversion system for specifications
+model SpecificationUnitConversion {
+  id               String       @id @default(cuid())
+  specificationId  String       @map("specification_id")
+  fromUnit         String       @map("from_unit") // "mm"
+  toUnit           String       @map("to_unit")   // "inch"
+  conversionFactor Decimal      @map("conversion_factor") @db.Decimal(20,10)
+  conversionOffset Decimal      @default(0) @map("conversion_offset") @db.Decimal(20,10)
+  displayFormat    String?      @map("display_format") // "0.##", "0.###"
+  
+  // Relationships
+  specification    TechnicalSpecification @relation(fields: [specificationId], references: [id], onDelete: Cascade)
+  
+  @@unique([specificationId, fromUnit, toUnit])
+  @@map("specification_unit_conversions")
+}
+
+// Audit log for specification changes
+model SpecificationChangeLog {
+  id               String       @id @default(cuid())
+  specificationId  String       @map("specification_id")
+  changeType       SpecChangeType
+  oldValue         String?      @map("old_value")
+  newValue         String       @map("new_value")
+  oldUnit          String?      @map("old_unit")
+  newUnit          String?      @map("new_unit")
+  reason           String?
+  changedBy        String       @map("changed_by")
+  changedAt        DateTime     @default(now()) @map("changed_at")
+  
+  // Relationships
+  specification    TechnicalSpecification @relation(fields: [specificationId], references: [id], onDelete: Cascade)
+  
+  @@index([specificationId, changedAt])
+  @@map("specification_change_log")
+}
+
+// Standard units registry for marine hardware
+model StandardUnit {
+  id               String       @id @default(cuid())
+  unit             String       @unique // "mm", "inch", "A", "N"
+  unitType         String       // "length", "current", "force", "weight"
+  systemType       String       // "metric", "imperial"
+  displayName      String       @map("display_name") // "Millimeters", "Inches"
+  symbol           String       // "mm", "in", "A", "N"
+  baseUnit         String?      @map("base_unit") // Reference to base unit for conversions
+  isBase           Boolean      @default(false) @map("is_base")
+  
+  @@index([unitType, systemType])
+  @@map("standard_units")
+}
+
+// Specification templates for common product types
+model SpecificationTemplate {
+  id               String       @id @default(cuid())
+  name             String       @unique // "Marine Fastener", "Cleat Hardware", "Door Lock"
+  description      String?
+  productTypes     String[]     @map("product_types") // ["fastener", "cleat"]
+  categories       Json         // Array of category IDs with default specs
+  isActive         Boolean      @default(true) @map("is_active")
+  
+  createdAt        DateTime     @default(now()) @map("created_at")
+  updatedAt        DateTime     @updatedAt @map("updated_at")
+  
+  @@map("specification_templates")
+}
+
+// Enums for specification system
+enum SpecImportance {
+  CRITICAL     // Always shown, highlighted prominently
+  IMPORTANT    // Shown by default, highlighted
+  STANDARD     // Shown by default, normal display
+  AUXILIARY    // Hidden by default, shown on expand
+}
+
+enum SpecDataType {
+  TEXT         // Free text value
+  NUMERIC      // Single numeric value
+  RANGE        // Numeric range (min-max)
+  BOOLEAN      // True/false
+  ENUM         // Predefined list of values
+  URL          // Web link
+  FILE         // File reference
+}
+
+enum SpecChangeType {
+  CREATED
+  VALUE_UPDATED
+  UNIT_CHANGED
+  CATEGORY_MOVED
+  METADATA_UPDATED
+  DELETED
+  VALIDATED
+}
+
+// Performance indexes for common queries
+// These would be created as database indexes:
+
+// Fast product specification retrieval with category grouping:
+// CREATE INDEX CONCURRENTLY idx_tech_specs_product_category_order 
+// ON technical_specifications (product_id, category_id, display_order);
+
+// Fast specification search across products:
+// CREATE INDEX CONCURRENTLY idx_tech_specs_searchable_name_value 
+// ON technical_specifications (is_searchable, name, value) 
+// WHERE is_searchable = true;
+
+// Comparison queries (multiple products):
+// CREATE INDEX CONCURRENTLY idx_tech_specs_comparison 
+// ON technical_specifications (category_id, name, product_id, is_comparable) 
+// WHERE is_comparable = true;
+
+// Numeric range queries for filtering:
+// CREATE INDEX CONCURRENTLY idx_tech_specs_numeric_range 
+// ON technical_specifications (category_id, name, numeric_value) 
+// WHERE numeric_value IS NOT NULL;
+
+// Category hierarchy queries:
+// CREATE INDEX CONCURRENTLY idx_spec_categories_hierarchy 
+// ON specification_categories (parent_id, display_order) 
+// WHERE parent_id IS NOT NULL;

@@ -1,0 +1,648 @@
+import type { Product, ProductVariant } from '@izerwaren/database';
+import type { ShopifyClient } from '../client';
+import type { 
+  ShopifyProduct, 
+  ProductCreateResponse, 
+  ProductUpdateResponse,
+  BulkOperationResponse,
+  APICallResult,
+  MigrationProgress,
+  ProductMappingResult 
+} from '../types/shopify';
+import { mapProductToShopify, mapVariantToShopify, validateProductForShopify } from '../utils/mapping';
+
+export class ProductService {
+  constructor(private client: ShopifyClient) {}
+
+  /**
+   * Create a single product in Shopify
+   */
+  async createProduct(
+    product: Product & {
+      productVariants?: ProductVariant[];
+      images?: Record<string, unknown>[];
+      specifications?: Record<string, unknown>[];
+    }
+  ): Promise<APICallResult<ShopifyProduct>> {
+    try {
+      // Validate product data
+      const validation = validateProductForShopify(product);
+      if (!validation.isValid) {
+        return {
+          success: false,
+          error: `Validation failed: ${validation.errors.join(', ')}`,
+        };
+      }
+
+      // Map product data to Shopify format
+      const shopifyProduct = mapProductToShopify(product);
+      
+      // Map variants if they exist, using correct field name from Prisma
+      const variants = product.productVariants?.map(variant => 
+        mapVariantToShopify(variant, product)
+      ) || [];
+
+      // If no variants exist, create a default variant with the base product price
+      if (variants.length === 0) {
+        variants.push({
+          title: 'Default Title',
+          price: product.price.toString(),
+          sku: product.sku || '',
+          inventoryQuantity: product.inventoryQty || 0,
+          weight: 0,
+          weightUnit: 'g',
+        });
+      }
+
+      const mutation = `
+        mutation productCreate($input: ProductInput!) {
+          productCreate(input: $input) {
+            product {
+              id
+              title
+              handle
+              status
+              createdAt
+              updatedAt
+              variants(first: 100) {
+                edges {
+                  node {
+                    id
+                    title
+                    sku
+                    price
+                    inventoryQuantity
+                  }
+                }
+              }
+            }
+            userErrors {
+              field
+              message
+            }
+          }
+        }
+      `;
+
+      const variables = {
+        input: {
+          ...shopifyProduct,
+          // Don't include variants in ProductInput - they will be created separately
+        },
+      };
+
+      const response = await this.client.mutation<ProductCreateResponse>(
+        mutation,
+        variables
+      );
+
+      if (response.productCreate.userErrors.length > 0) {
+        return {
+          success: false,
+          error: response.productCreate.userErrors
+            .map(err => err.message)
+            .join(', '),
+        };
+      }
+
+      // Now update the default variant with correct pricing and details
+      const createdProduct = response.productCreate.product!;
+      if (createdProduct.variants.edges.length > 0) {
+        const defaultVariantId = createdProduct.variants.edges[0].node.id;
+        
+        // Determine the variant data to use
+        const variantData = variants.length > 0 ? variants[0] : {
+          title: 'Default Title',
+          price: product.price.toString(),
+          sku: product.sku || '',
+          inventoryQuantity: product.inventoryQty || 0,
+        };
+
+        // Update the default variant with correct pricing
+        const variantUpdateMutation = `
+          mutation productVariantUpdate($input: ProductVariantInput!) {
+            productVariantUpdate(input: $input) {
+              productVariant {
+                id
+                price
+                sku
+                inventoryQuantity
+              }
+              userErrors {
+                field
+                message
+              }
+            }
+          }
+        `;
+
+        const variantUpdateVariables = {
+          input: {
+            id: defaultVariantId,
+            price: variantData.price,
+            sku: variantData.sku,
+            inventoryQuantity: variantData.inventoryQuantity,
+          },
+        };
+
+        console.log('🔧 Updating variant with:', JSON.stringify(variantUpdateVariables, null, 2));
+        
+        const variantResponse = await this.client.mutation(variantUpdateMutation, variantUpdateVariables);
+        
+        console.log('🔧 Variant update response:', JSON.stringify(variantResponse, null, 2));
+        
+        if (variantResponse?.productVariantUpdate?.userErrors?.length > 0) {
+          console.warn('⚠️ Variant update had errors:', variantResponse.productVariantUpdate.userErrors);
+        }
+      }
+
+      return {
+        success: true,
+        data: createdProduct,
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error occurred',
+      };
+    }
+  }
+
+  /**
+   * Update an existing product in Shopify
+   */
+  async updateProduct(
+    shopifyProductId: string,
+    product: Partial<Product>
+  ): Promise<APICallResult<ShopifyProduct>> {
+    try {
+      const shopifyProduct = mapProductToShopify(product as Product);
+
+      const mutation = `
+        mutation productUpdate($input: ProductInput!) {
+          productUpdate(input: $input) {
+            product {
+              id
+              title
+              handle
+              status
+              updatedAt
+            }
+            userErrors {
+              field
+              message
+            }
+          }
+        }
+      `;
+
+      const variables = {
+        input: {
+          id: shopifyProductId,
+          ...shopifyProduct,
+        },
+      };
+
+      const response = await this.client.mutation<ProductUpdateResponse>(
+        mutation,
+        variables
+      );
+
+      if (response.productUpdate.userErrors.length > 0) {
+        return {
+          success: false,
+          error: response.productUpdate.userErrors
+            .map(err => err.message)
+            .join(', '),
+        };
+      }
+
+      return {
+        success: true,
+        data: response.productUpdate.product!,
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error occurred',
+      };
+    }
+  }
+
+  /**
+   * Get product by ID from Shopify
+   */
+  async getProduct(shopifyProductId: string): Promise<APICallResult<ShopifyProduct>> {
+    try {
+      const query = `
+        query getProduct($id: ID!) {
+          product(id: $id) {
+            id
+            title
+            handle
+            description
+            vendor
+            productType
+            tags
+            status
+            createdAt
+            updatedAt
+            variants(first: 100) {
+              edges {
+                node {
+                  id
+                  title
+                  sku
+                  price
+                  compareAtPrice
+                  inventoryQuantity
+                  weight
+                  weightUnit
+                }
+              }
+            }
+            images(first: 250) {
+              edges {
+                node {
+                  id
+                  src: url
+                  altText
+                  width
+                  height
+                }
+              }
+            }
+          }
+        }
+      `;
+
+      const response = await this.client.query<{ product: ShopifyProduct }>(
+        query,
+        { id: shopifyProductId }
+      );
+
+      if (!response.product) {
+        return {
+          success: false,
+          error: 'Product not found',
+        };
+      }
+
+      return {
+        success: true,
+        data: response.product,
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error occurred',
+      };
+    }
+  }
+
+  /**
+   * Delete product from Shopify
+   */
+  async deleteProduct(shopifyProductId: string): Promise<APICallResult<boolean>> {
+    try {
+      const mutation = `
+        mutation productDelete($input: ProductDeleteInput!) {
+          productDelete(input: $input) {
+            deletedProductId
+            userErrors {
+              field
+              message
+            }
+          }
+        }
+      `;
+
+      const response = await this.client.mutation<{
+        productDelete: {
+          deletedProductId?: string;
+          userErrors: Array<{ field: string[]; message: string }>;
+        };
+      }>(mutation, {
+        input: { id: shopifyProductId },
+      });
+
+      if (response.productDelete.userErrors.length > 0) {
+        return {
+          success: false,
+          error: response.productDelete.userErrors
+            .map(err => err.message)
+            .join(', '),
+        };
+      }
+
+      return {
+        success: true,
+        data: !!response.productDelete.deletedProductId,
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error occurred',
+      };
+    }
+  }
+
+  /**
+   * List products with pagination
+   */
+  async listProducts(
+    first: number = 50,
+    after?: string
+  ): Promise<APICallResult<{
+    products: ShopifyProduct[];
+    hasNextPage: boolean;
+    endCursor?: string;
+  }>> {
+    try {
+      const query = `
+        query listProducts($first: Int!, $after: String) {
+          products(first: $first, after: $after) {
+            edges {
+              node {
+                id
+                title
+                handle
+                status
+                createdAt
+                updatedAt
+                variants(first: 1) {
+                  edges {
+                    node {
+                      id
+                      sku
+                    }
+                  }
+                }
+              }
+            }
+            pageInfo {
+              hasNextPage
+              endCursor
+            }
+          }
+        }
+      `;
+
+      const response = await this.client.query<{
+        products: {
+          edges: Array<{ node: ShopifyProduct }>;
+          pageInfo: { hasNextPage: boolean; endCursor?: string };
+        };
+      }>(query, { first, after });
+
+      return {
+        success: true,
+        data: {
+          products: response.products.edges.map(edge => edge.node),
+          hasNextPage: response.products.pageInfo.hasNextPage,
+          endCursor: response.products.pageInfo.endCursor,
+        },
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error occurred',
+      };
+    }
+  }
+
+  /**
+   * Search products by title or SKU
+   */
+  async searchProducts(
+    query: string,
+    first: number = 50
+  ): Promise<APICallResult<ShopifyProduct[]>> {
+    try {
+      const searchQuery = `
+        query searchProducts($query: String!, $first: Int!) {
+          products(first: $first, query: $query) {
+            edges {
+              node {
+                id
+                title
+                handle
+                status
+                variants(first: 5) {
+                  edges {
+                    node {
+                      id
+                      sku
+                      title
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      `;
+
+      const response = await this.client.query<{
+        products: {
+          edges: Array<{ node: ShopifyProduct }>;
+        };
+      }>(searchQuery, { query, first });
+
+      return {
+        success: true,
+        data: response.products.edges.map(edge => edge.node),
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error occurred',
+      };
+    }
+  }
+
+  /**
+   * Check if a product exists by handle or SKU
+   */
+  async productExists(
+    handle?: string,
+    sku?: string
+  ): Promise<APICallResult<{ exists: boolean; productId?: string }>> {
+    try {
+      let searchQuery = '';
+      
+      if (handle) {
+        searchQuery = `handle:${handle}`;
+      } else if (sku) {
+        searchQuery = `sku:${sku}`;
+      } else {
+        return {
+          success: false,
+          error: 'Either handle or SKU must be provided',
+        };
+      }
+
+      const result = await this.searchProducts(searchQuery, 1);
+      
+      if (!result.success) {
+        return result;
+      }
+
+      const exists = result.data!.length > 0;
+      return {
+        success: true,
+        data: {
+          exists,
+          productId: exists ? result.data![0].id : undefined,
+        },
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error occurred',
+      };
+    }
+  }
+
+  /**
+   * Bulk create products using Shopify's Bulk Operations API
+   */
+  async bulkCreateProducts(
+    products: Array<Product & {
+      variants?: ProductVariant[];
+      images?: Record<string, unknown>[];
+      specifications?: Record<string, unknown>[];
+    }>
+  ): Promise<APICallResult<string>> {
+    try {
+      // Generate bulk mutation
+      const mutations = products.map((product, index) => {
+        const shopifyProduct = mapProductToShopify(product);
+        const variants = product.variants?.map(variant => 
+          mapVariantToShopify(variant, product)
+        );
+
+        return `
+          mutation${index}: productCreate(input: {
+            title: "${shopifyProduct.title}"
+            handle: "${shopifyProduct.handle}"
+            description: "${shopifyProduct.description || ''}"
+            vendor: "${shopifyProduct.vendor || ''}"
+            productType: "${shopifyProduct.product_type || ''}"
+            tags: [${shopifyProduct.tags?.map(tag => `"${tag}"`).join(', ') || ''}]
+            status: ${shopifyProduct.status?.toUpperCase() || 'ACTIVE'}
+            ${variants?.length ? `
+            variants: [${variants.map(variant => `{
+              title: "${variant.title}"
+              price: "${variant.price}"
+              sku: "${variant.sku || ''}"
+              inventoryQuantity: ${variant.inventory_quantity}
+              weight: ${variant.weight}
+              weightUnit: ${variant.weight_unit?.toUpperCase() || 'GRAMS'}
+            }`).join(', ')}]
+            ` : ''}
+          }) {
+            product {
+              id
+              handle
+            }
+            userErrors {
+              field
+              message
+            }
+          }
+        `;
+      }).join('\n');
+
+      const bulkMutation = `
+        mutation {
+          bulkOperationRunQuery(
+            query: """
+              mutation {
+                ${mutations}
+              }
+            """
+          ) {
+            bulkOperation {
+              id
+              status
+            }
+            userErrors {
+              field
+              message
+            }
+          }
+        }
+      `;
+
+      const response = await this.client.mutation<BulkOperationResponse>(bulkMutation);
+
+      if (response.bulkOperationRunQuery.userErrors.length > 0) {
+        return {
+          success: false,
+          error: response.bulkOperationRunQuery.userErrors
+            .map(err => err.message)
+            .join(', '),
+        };
+      }
+
+      return {
+        success: true,
+        data: response.bulkOperationRunQuery.bulkOperation?.id || '',
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error occurred',
+      };
+    }
+  }
+
+  /**
+   * Get bulk operation status
+   */
+  async getBulkOperationStatus(operationId: string): Promise<APICallResult<{
+    status: string;
+    objectCount?: number;
+    url?: string;
+    errorCode?: string;
+  }>> {
+    try {
+      const query = `
+        query getBulkOperation($id: ID!) {
+          node(id: $id) {
+            ... on BulkOperation {
+              id
+              status
+              errorCode
+              createdAt
+              completedAt
+              objectCount
+              fileSize
+              url
+            }
+          }
+        }
+      `;
+
+      const response = await this.client.query<{
+        node: {
+          status: string;
+          errorCode?: string;
+          objectCount?: number;
+          url?: string;
+        };
+      }>(query, { id: operationId });
+
+      return {
+        success: true,
+        data: response.node,
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error occurred',
+      };
+    }
+  }
+}

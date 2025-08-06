@@ -1,0 +1,441 @@
+import { Pool } from 'pg';
+import type { CartSummary, CartItem, VolumeDiscount } from '../types/cart';
+import type { AuthenticatedCustomer } from './AuthService';
+import type { DealerTier } from '../types/customer';
+
+export interface PricingDetails {
+  list_price: number;
+  dealer_price: number;
+  tier_discount_percent: number;
+  volume_discount_percent: number;
+  final_price: number;
+  savings: number;
+}
+
+export interface QuantityBreak {
+  min_quantity: number;
+  discount_percent: number;
+  price_per_unit: number;
+}
+
+export class PricingService {
+  private static pool: Pool;
+
+  static initialize(pool: Pool) {
+    this.pool = pool;
+  }
+
+  // Apply tier-based pricing to entire cart
+  static async applyCartPricing(cart: CartSummary, customer: AuthenticatedCustomer): Promise<CartSummary> {
+    const pricedItems: CartItem[] = [];
+    let totalDiscount = 0;
+    let totalSavings = 0;
+    const volumeDiscountsApplied: VolumeDiscount[] = [];
+
+    // Get tier discount percentage
+    const tierDiscount = this.getTierDiscountPercent(customer.profile.tier);
+
+    for (const item of cart.items) {
+      const pricingDetails = await this.calculateItemPricing(
+        item.shopify_product_id,
+        item.shopify_variant_id,
+        item.quantity,
+        customer
+      );
+
+      const pricedItem: CartItem = {
+        ...item,
+        list_price: pricingDetails.list_price,
+        unit_price: pricingDetails.final_price,
+        discount_percent: pricingDetails.tier_discount_percent + pricingDetails.volume_discount_percent,
+        total_price: pricingDetails.final_price * item.quantity
+      };
+
+      pricedItems.push(pricedItem);
+      
+      // Calculate total savings
+      const itemSavings = (pricingDetails.list_price - pricingDetails.final_price) * item.quantity;
+      totalSavings += itemSavings;
+      totalDiscount += pricingDetails.list_price * item.quantity - pricedItem.total_price;
+
+      // Collect volume discounts
+      if (pricingDetails.volume_discount_percent > 0) {
+        volumeDiscountsApplied.push({
+          min_quantity: item.quantity,
+          discount_percent: pricingDetails.volume_discount_percent,
+          applies_to: 'item'
+        });
+      }
+    }
+
+    const subtotal = pricedItems.reduce((sum, item) => sum + item.total_price, 0);
+    const estimatedTax = subtotal * 0.08; // 8% estimated tax
+    const estimatedShipping = this.calculateShipping(subtotal, customer.profile.tier);
+
+    return {
+      items: pricedItems,
+      item_count: pricedItems.length,
+      total_quantity: pricedItems.reduce((sum, item) => sum + item.quantity, 0),
+      subtotal,
+      total_discount: totalDiscount,
+      estimated_tax: estimatedTax,
+      estimated_shipping: estimatedShipping,
+      total_estimated: subtotal + estimatedTax + estimatedShipping,
+      tier_discount_percent: tierDiscount,
+      volume_discounts_applied: volumeDiscountsApplied,
+      savings_from_list_price: totalSavings
+    };
+  }
+
+  // Calculate pricing for a single item
+  static async calculateItemPricing(
+    productId: string,
+    variantId: string,
+    quantity: number,
+    customer: AuthenticatedCustomer
+  ): Promise<PricingDetails> {
+    const client = await this.pool.connect();
+    
+    try {
+      // Get base pricing from database
+      const basePriceQuery = `
+        SELECT 
+          pv.price as list_price,
+          dp.markdown_percent,
+          dp.fixed_price
+        FROM product_variants pv
+        LEFT JOIN dealer_pricing dp ON dp.shopify_product_id = $1 AND dp.dealer_id = $3
+        WHERE pv.shopify_variant_id = $2
+      `;
+      
+      const result = await client.query(basePriceQuery, [productId, variantId, customer.profile.id]);
+      
+      if (result.rows.length === 0) {
+        throw new Error(`Pricing not found for variant ${variantId}`);
+      }
+
+      const row = result.rows[0];
+      const listPrice = parseFloat(row.list_price) || 0;
+      
+      // Use custom dealer pricing if available
+      let dealerPrice = listPrice;
+      if (row.fixed_price) {
+        dealerPrice = parseFloat(row.fixed_price);
+      } else if (row.markdown_percent) {
+        dealerPrice = listPrice * (1 - parseFloat(row.markdown_percent) / 100);
+      }
+
+      // Apply tier discount
+      const tierDiscountPercent = this.getTierDiscountPercent(customer.profile.tier);
+      const tierDiscountedPrice = dealerPrice * (1 - tierDiscountPercent / 100);
+
+      // Apply volume discounts
+      const volumeDiscount = await this.getVolumeDiscount(productId, quantity);
+      const volumeDiscountPercent = volumeDiscount?.discount_percent || 0;
+      const finalPrice = tierDiscountedPrice * (1 - volumeDiscountPercent / 100);
+
+      const savings = listPrice - finalPrice;
+
+      return {
+        list_price: listPrice,
+        dealer_price: dealerPrice,
+        tier_discount_percent: tierDiscountPercent,
+        volume_discount_percent: volumeDiscountPercent,
+        final_price: finalPrice,
+        savings
+      };
+    } finally {
+      client.release();
+    }
+  }
+
+  // Get tier-based discount percentage
+  static getTierDiscountPercent(tier: DealerTier): number {
+    switch (tier) {
+      case 'STANDARD':
+        return 0;
+      case 'PREMIUM':
+        return 10;
+      case 'ENTERPRISE':
+        return 15;
+      default:
+        return 0;
+    }
+  }
+
+  // Get volume discount for product/quantity
+  static async getVolumeDiscount(productId: string, quantity: number): Promise<VolumeDiscount | null> {
+    const client = await this.pool.connect();
+    
+    try {
+      const query = `
+        SELECT min_quantity, discount_percent
+        FROM volume_discounts
+        WHERE shopify_product_id = $1 AND min_quantity <= $2
+        ORDER BY min_quantity DESC
+        LIMIT 1
+      `;
+      
+      const result = await client.query(query, [productId, quantity]);
+      
+      if (result.rows.length === 0) {
+        return null;
+      }
+
+      const row = result.rows[0];
+      return {
+        min_quantity: row.min_quantity,
+        discount_percent: parseFloat(row.discount_percent),
+        applies_to: 'item'
+      };
+    } finally {
+      client.release();
+    }
+  }
+
+  // Get quantity breaks for a product
+  static async getQuantityBreaks(productId: string, customerId: string): Promise<QuantityBreak[]> {
+    const client = await this.pool.connect();
+    
+    try {
+      const query = `
+        SELECT 
+          vd.min_quantity,
+          vd.discount_percent,
+          pv.price as list_price,
+          dp.markdown_percent,
+          dp.fixed_price
+        FROM volume_discounts vd
+        CROSS JOIN product_variants pv
+        LEFT JOIN dealer_pricing dp ON dp.shopify_product_id = $1 AND dp.dealer_id = $2
+        WHERE vd.shopify_product_id = $1 AND pv.shopify_product_id = $1
+        ORDER BY vd.min_quantity ASC
+      `;
+      
+      const result = await client.query(query, [productId, customerId]);
+      
+      return result.rows.map(row => {
+        const listPrice = parseFloat(row.list_price) || 0;
+        let basePrice = listPrice;
+        
+        // Apply dealer-specific pricing
+        if (row.fixed_price) {
+          basePrice = parseFloat(row.fixed_price);
+        } else if (row.markdown_percent) {
+          basePrice = listPrice * (1 - parseFloat(row.markdown_percent) / 100);
+        }
+
+        // Apply volume discount
+        const volumeDiscountPercent = parseFloat(row.discount_percent) || 0;
+        const finalPrice = basePrice * (1 - volumeDiscountPercent / 100);
+
+        return {
+          min_quantity: row.min_quantity,
+          discount_percent: volumeDiscountPercent,
+          price_per_unit: finalPrice
+        };
+      });
+    } finally {
+      client.release();
+    }
+  }
+
+  // Calculate shipping based on cart value and tier
+  static calculateShipping(cartValue: number, tier: DealerTier): number {
+    // Free shipping thresholds by tier
+    const freeShippingThresholds = {
+      STANDARD: 500,
+      PREMIUM: 250,
+      ENTERPRISE: 0 // Always free shipping
+    };
+
+    const threshold = freeShippingThresholds[tier] || 500;
+    
+    if (cartValue >= threshold) {
+      return 0;
+    }
+
+    // Calculate shipping based on cart value
+    if (cartValue < 100) {
+      return 25;
+    } else if (cartValue < 250) {
+      return 15;
+    } else {
+      return 10;
+    }
+  }
+
+  // Get pricing summary for a product across tiers
+  static async getProductPricingSummary(productId: string, variantId: string): Promise<{
+    list_price: number;
+    standard_price: number;
+    premium_price: number;
+    enterprise_price: number;
+  }> {
+    const client = await this.pool.connect();
+    
+    try {
+      const query = `
+        SELECT price as list_price
+        FROM product_variants
+        WHERE shopify_variant_id = $1
+      `;
+      
+      const result = await client.query(query, [variantId]);
+      
+      if (result.rows.length === 0) {
+        throw new Error(`Product variant ${variantId} not found`);
+      }
+
+      const listPrice = parseFloat(result.rows[0].list_price) || 0;
+      
+      return {
+        list_price: listPrice,
+        standard_price: listPrice, // 0% discount
+        premium_price: listPrice * 0.9, // 10% discount
+        enterprise_price: listPrice * 0.85 // 15% discount
+      };
+    } finally {
+      client.release();
+    }
+  }
+
+  // Update dealer-specific pricing
+  static async updateDealerPricing(customerId: string, productId: string, pricing: {
+    markdown_percent?: number;
+    fixed_price?: number;
+  }): Promise<void> {
+    const client = await this.pool.connect();
+    
+    try {
+      const upsertQuery = `
+        INSERT INTO dealer_pricing (dealer_id, shopify_product_id, markdown_percent, fixed_price, updated_at)
+        VALUES ($1, $2, $3, $4, NOW())
+        ON CONFLICT (dealer_id, shopify_product_id)
+        DO UPDATE SET
+          markdown_percent = EXCLUDED.markdown_percent,
+          fixed_price = EXCLUDED.fixed_price,
+          updated_at = NOW()
+      `;
+      
+      await client.query(upsertQuery, [
+        customerId,
+        productId,
+        pricing.markdown_percent || null,
+        pricing.fixed_price || null
+      ]);
+    } finally {
+      client.release();
+    }
+  }
+
+  // Get dealer's custom pricing
+  static async getDealerPricing(customerId: string, productId?: string): Promise<Array<{
+    product_id: string;
+    markdown_percent?: number;
+    fixed_price?: number;
+    updated_at: string;
+  }>> {
+    const client = await this.pool.connect();
+    
+    try {
+      let query = `
+        SELECT 
+          shopify_product_id as product_id,
+          markdown_percent,
+          fixed_price,
+          updated_at
+        FROM dealer_pricing
+        WHERE dealer_id = $1
+      `;
+      
+      const params = [customerId];
+      
+      if (productId) {
+        query += ' AND shopify_product_id = $2';
+        params.push(productId);
+      }
+      
+      query += ' ORDER BY updated_at DESC';
+      
+      const result = await client.query(query, params);
+      
+      return result.rows.map(row => ({
+        product_id: row.product_id,
+        markdown_percent: row.markdown_percent ? parseFloat(row.markdown_percent) : undefined,
+        fixed_price: row.fixed_price ? parseFloat(row.fixed_price) : undefined,
+        updated_at: row.updated_at.toISOString()
+      }));
+    } finally {
+      client.release();
+    }
+  }
+
+  // Calculate minimum order value by tier
+  static getMinimumOrderValue(tier: DealerTier): number {
+    switch (tier) {
+      case 'STANDARD':
+        return 100;
+      case 'PREMIUM':
+        return 50;
+      case 'ENTERPRISE':
+        return 0; // No minimum
+      default:
+        return 100;
+    }
+  }
+
+  // Check if customer qualifies for next tier
+  static async checkTierUpgradeEligibility(customerId: string): Promise<{
+    current_tier: DealerTier;
+    eligible_for_upgrade: boolean;
+    next_tier?: DealerTier;
+    requirements_met: boolean;
+    total_orders: number;
+    total_value: number;
+  }> {
+    const client = await this.pool.connect();
+    
+    try {
+      // Get customer's current tier
+      const customerQuery = 'SELECT tier FROM dealers WHERE id = $1';
+      const customerResult = await client.query(customerQuery, [customerId]);
+      
+      if (customerResult.rows.length === 0) {
+        throw new Error('Customer not found');
+      }
+
+      const currentTier = customerResult.rows[0].tier as DealerTier;
+      
+      // Get order history stats (this would require Shopify integration)
+      // For now, return mock data
+      const totalOrders = 0;
+      const totalValue = 0;
+      
+      let eligibleForUpgrade = false;
+      let nextTier: DealerTier | undefined;
+      let requirementsMet = false;
+
+      if (currentTier === 'STANDARD' && totalValue >= 10000) {
+        eligibleForUpgrade = true;
+        nextTier = 'PREMIUM';
+        requirementsMet = totalOrders >= 5;
+      } else if (currentTier === 'PREMIUM' && totalValue >= 50000) {
+        eligibleForUpgrade = true;
+        nextTier = 'ENTERPRISE';
+        requirementsMet = totalOrders >= 20;
+      }
+
+      return {
+        current_tier: currentTier,
+        eligible_for_upgrade: eligibleForUpgrade,
+        next_tier: nextTier,
+        requirements_met: requirementsMet,
+        total_orders: totalOrders,
+        total_value: totalValue
+      };
+    } finally {
+      client.release();
+    }
+  }
+}

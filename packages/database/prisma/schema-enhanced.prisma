@@ -1,0 +1,620 @@
+// Enhanced Prisma schema for B2B Supplements E-commerce
+// Optimized for enterprise performance and data integrity
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Account management for all user types (dealers, pros, account reps)
+model Account {
+  id                  String                    @id @default(cuid())
+  firebaseUid         String                    @unique @map("firebase_uid")
+  accountType         AccountType               @map("account_type")
+  companyName         String?                   @map("company_name")
+  contactEmail        String                    @map("contact_email")
+  contactPhone        String?                   @map("contact_phone")
+  tier                AccountTier?              // Only applies to DEALER and PRO accounts
+  isActive            Boolean                   @default(true) @map("is_active")
+  createdAt           DateTime                  @default(now()) @map("created_at")
+  updatedAt           DateTime                  @updatedAt @map("updated_at")
+  
+  // Account Rep specific fields
+  territoryRegions    String[]                  @map("territory_regions") // For Account Reps
+  maxRfqCapacity      Int?                      @map("max_rfq_capacity") // For Account Reps
+  
+  // Relationships
+  shopifyCustomers    AccountShopifyCustomer[]
+  accountPricing      AccountPricing[]
+  rfqRequestsOwned    RfqRequest[]             @relation("CustomerRfqRequests")
+  rfqRequestsAssigned RfqRequest[]             @relation("AssignedRfqRequests")
+  
+  // Performance indexes
+  @@index([firebaseUid])
+  @@index([accountType, isActive])
+  @@index([tier, isActive]) 
+  @@index([contactEmail])
+  @@map("accounts")
+}
+
+// Legacy Dealer model - kept for backward compatibility during migration
+model Dealer {
+  id                  String                    @id @default(cuid())
+  firebaseUid         String                    @unique @map("firebase_uid")
+  companyName         String                    @map("company_name")
+  contactEmail        String                    @map("contact_email")
+  contactPhone        String?                   @map("contact_phone")
+  tier                DealerTier                @default(STANDARD)
+  isActive            Boolean                   @default(true) @map("is_active")
+  createdAt           DateTime                  @default(now()) @map("created_at")
+  updatedAt           DateTime                  @updatedAt @map("updated_at")
+  
+  // Relationships
+  shopifyCustomers    DealerShopifyCustomer[]
+  dealerPricing       DealerPricing[]
+  rfqRequests         RfqRequest[]
+  cartItems           CartItem[]
+  savedCarts          SavedCart[]
+  
+  @@index([firebaseUid])
+  @@index([tier, isActive])
+  @@map("dealers")
+}
+
+// Junction table mapping Account to Shopify Customer ID
+model AccountShopifyCustomer {
+  id               String  @id @default(cuid())
+  accountId        String  @map("account_id")
+  shopifyCustomerId String  @map("shopify_customer_id")
+  
+  // Relationships
+  account          Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  
+  @@unique([accountId, shopifyCustomerId])
+  @@index([shopifyCustomerId])
+  @@map("account_shopify_customers")
+}
+
+// Legacy - kept for backward compatibility
+model DealerShopifyCustomer {
+  id               String  @id @default(cuid())
+  dealerId         String  @map("dealer_id")
+  shopifyCustomerId String  @map("shopify_customer_id")
+  
+  // Relationships
+  dealer           Dealer  @relation(fields: [dealerId], references: [id], onDelete: Cascade)
+  
+  @@unique([dealerId, shopifyCustomerId])
+  @@index([shopifyCustomerId])
+  @@map("dealer_shopify_customers")
+}
+
+// Account-specific pricing overrides (for dealers and pro accounts)
+model AccountPricing {
+  id               String      @id @default(cuid())
+  accountId        String      @map("account_id")
+  shopifyProductId String      @map("shopify_product_id")
+  shopifyVariantId String?     @map("shopify_variant_id")
+  markdownPercent  Decimal     @map("markdown_percent") @db.Decimal(5,2)
+  fixedPrice       Decimal?    @map("fixed_price") @db.Decimal(10,2)
+  minQuantity      Int         @default(1) @map("min_quantity")
+  maxQuantity      Int?        @map("max_quantity")
+  isActive         Boolean     @default(true) @map("is_active")
+  effectiveFrom    DateTime    @default(now()) @map("effective_from")
+  effectiveUntil   DateTime?   @map("effective_until")
+  createdAt        DateTime    @default(now()) @map("created_at")
+  updatedAt        DateTime    @updatedAt @map("updated_at")
+  
+  // Enhanced relationships
+  productId        String?     @map("product_id") // Link to catalog products
+  
+  // Relationships
+  account          Account     @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  product          Product?    @relation(fields: [productId], references: [id], onDelete: Cascade)
+  
+  @@unique([accountId, shopifyProductId, shopifyVariantId])
+  // High-performance composite index for pricing lookups
+  @@index([accountId, shopifyProductId, isActive, effectiveFrom])
+  @@index([isActive, effectiveFrom, effectiveUntil])
+  @@map("account_pricing")
+}
+
+// Legacy - kept for backward compatibility
+model DealerPricing {
+  id               String      @id @default(cuid())
+  dealerId         String      @map("dealer_id")
+  shopifyProductId String      @map("shopify_product_id")
+  shopifyVariantId String?     @map("shopify_variant_id")
+  markdownPercent  Decimal     @map("markdown_percent") @db.Decimal(5,2)
+  fixedPrice       Decimal?    @map("fixed_price") @db.Decimal(10,2)
+  minQuantity      Int         @default(1) @map("min_quantity")
+  maxQuantity      Int?        @map("max_quantity")
+  isActive         Boolean     @default(true) @map("is_active")
+  effectiveFrom    DateTime    @default(now()) @map("effective_from")
+  effectiveUntil   DateTime?   @map("effective_until")
+  createdAt        DateTime    @default(now()) @map("created_at")
+  updatedAt        DateTime    @updatedAt @map("updated_at")
+  
+  // Relationships
+  dealer           Dealer      @relation(fields: [dealerId], references: [id], onDelete: Cascade)
+  
+  @@unique([dealerId, shopifyProductId, shopifyVariantId])
+  @@index([dealerId, shopifyProductId, isActive])
+  @@map("dealer_pricing")
+}
+
+// RFQ (Request for Quote) system with account rep assignment
+model RfqRequest {
+  id               String      @id @default(cuid())
+  customerId       String      @map("customer_id") // Account who created the request
+  assignedRepId    String?     @map("assigned_rep_id") // Account Rep assigned to handle
+  requestNumber    String      @unique @map("request_number")
+  status           RfqStatus   @default(PENDING)
+  priority         RfqPriority @default(NORMAL)
+  customerMessage  String      @map("customer_message")
+  adminNotes       String?     @map("admin_notes")
+  quotedTotal      Decimal?    @map("quoted_total") @db.Decimal(10,2)
+  validUntil       DateTime?   @map("valid_until")
+  shopifyOrderId   String?     @map("shopify_order_id")
+  createdAt        DateTime    @default(now()) @map("created_at")
+  updatedAt        DateTime    @updatedAt @map("updated_at")
+  
+  // Relationships
+  customer         Account     @relation("CustomerRfqRequests", fields: [customerId], references: [id], onDelete: Cascade)
+  assignedRep      Account?    @relation("AssignedRfqRequests", fields: [assignedRepId], references: [id])
+  items            RfqItem[]
+  
+  // Legacy relationship - kept for backward compatibility
+  dealerId         String?     @map("dealer_id")
+  dealer           Dealer?     @relation(fields: [dealerId], references: [id], onDelete: Cascade)
+  
+  // Performance indexes for RFQ management
+  @@index([status, priority, createdAt(sort: Desc)])
+  @@index([customerId, status])
+  @@index([assignedRepId, status])
+  @@index([requestNumber])
+  @@map("rfq_requests")
+}
+
+// Individual items within an RFQ - Enhanced for variable products
+model RfqItem {
+  id               String     @id @default(cuid())
+  rfqRequestId     String     @map("rfq_request_id")
+  shopifyProductId String     @map("shopify_product_id")
+  shopifyVariantId String?    @map("shopify_variant_id")
+  sku              String
+  productTitle     String     @map("product_title")
+  quantity         Int
+  unitPrice        Decimal?   @map("unit_price") @db.Decimal(10,2)
+  totalPrice       Decimal?   @map("total_price") @db.Decimal(10,2)
+  notes            String?
+  
+  // Variable product support
+  productVariantId String?            @map("product_variant_id")
+  variantSku       String?            @map("variant_sku")
+  variantTitle     String?            @map("variant_title")
+  selectedOptions  Json?              @map("selected_options")
+  
+  // Relationships
+  rfqRequest       RfqRequest                @relation(fields: [rfqRequestId], references: [id], onDelete: Cascade)
+  productVariant   CatalogProductVariant?    @relation(fields: [productVariantId], references: [id])
+  
+  @@index([rfqRequestId])
+  @@index([shopifyProductId])
+  @@index([sku])
+  @@map("rfq_items")
+}
+
+// Enhanced Product model supporting both simple and variable products
+model Product {
+  id               String      @id @default(cuid())
+  shopifyProductId String?     @unique @map("shopify_product_id")
+  title            String
+  handle           String      @unique
+  vendor           String?
+  productType      ProductTypeEnum @default(SIMPLE) @map("product_type")
+  tags             String[]
+  description      String?
+  status           String      @default("active")
+  
+  // Enhanced product fields for Revival integration
+  sku              String?     @unique // Revival SKU
+  price            Decimal?    @db.Decimal(10,2)
+  retailPrice      Decimal?    @map("retail_price") @db.Decimal(10,2)
+  partNumber       String?     @map("part_number")
+  categoryName     String?     @map("category_name")
+  availability     String?
+  imageCount       Int?        @map("image_count")
+  primaryImagePath String?     @map("primary_image_path")
+  
+  // Variant support
+  hasVariants      Boolean     @default(false) @map("has_variants")
+  variantCount     Int         @default(0) @map("variant_count")
+  
+  createdAt        DateTime    @default(now()) @map("created_at")
+  updatedAt        DateTime    @updatedAt @map("updated_at")
+  
+  // Relationships
+  shopifyVariants  ProductVariant[]         // Legacy Shopify variants
+  productVariants  CatalogProductVariant[]  // New catalog variants
+  variantGroups    ProductVariantGroup[]
+  technicalSpecs   TechnicalSpecification[]
+  images           ProductImage[]
+  catalogs         ProductCatalog[]
+  syncLogs         ProductSyncLog[]
+  accountPricing   AccountPricing[]
+  cartItems        CartItem[]
+  savedCartItems   SavedCartItem[]
+  volumeDiscounts  VolumeDiscount[]
+  
+  // Performance indexes for product catalog operations
+  @@index([shopifyProductId])
+  @@index([handle])
+  @@index([sku])
+  @@index([vendor, status])
+  @@index([productType, status])
+  @@index([categoryName, status])
+  @@index([status, createdAt(sort: Desc)])
+  // Full-text search index (implemented via SQL after migration)
+  @@map("products")
+}
+
+// Local shadow table for Shopify variants
+model ProductVariant {
+  id               String   @id @default(cuid())
+  productId        String   @map("product_id")
+  shopifyVariantId String   @unique @map("shopify_variant_id")
+  sku              String?  @unique
+  title            String
+  price            Decimal  @db.Decimal(10,2)
+  compareAtPrice   Decimal? @map("compare_at_price") @db.Decimal(10,2)
+  inventoryQty     Int      @default(0) @map("inventory_qty")
+  weight           Decimal? @db.Decimal(8,2)
+  weightUnit       String?  @map("weight_unit")
+  
+  // Relationships
+  product          Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  
+  @@index([productId])
+  @@index([shopifyVariantId])
+  @@index([sku])
+  @@map("product_variants")
+}
+
+// Product synchronization audit log
+model ProductSyncLog {
+  id               String       @id @default(cuid())
+  productId        String?      @map("product_id")
+  shopifyProductId String?      @map("shopify_product_id")
+  operation        SyncOperation
+  status           SyncStatus
+  errorMessage     String?      @map("error_message")
+  sourceData       Json?        @map("source_data")
+  syncedAt         DateTime     @default(now()) @map("synced_at")
+  
+  // Relationships
+  product          Product?     @relation(fields: [productId], references: [id])
+  
+  @@index([productId, syncedAt(sort: Desc)])
+  @@index([operation, status])
+  @@index([syncedAt(sort: Desc)])
+  @@map("product_sync_log")
+}
+
+// Variant groups for configurable products (Handing, Door Thickness, etc.)
+model ProductVariantGroup {
+  id             String                     @id @default(cuid())
+  productId      String                     @map("product_id")
+  name           String                     // "Handing", "Door Thickness"
+  label          String                     // "Handing", "Door Thickness"
+  inputType      String                     @default("dropdown") @map("input_type")
+  required       Boolean                    @default(true)
+  sortOrder      Int?                       @map("sort_order")
+  
+  product        Product                    @relation(fields: [productId], references: [id], onDelete: Cascade)
+  options        ProductVariantOption[]
+  
+  @@unique([productId, name])
+  @@index([productId, sortOrder])
+  @@map("product_variant_groups")
+}
+
+// Individual options within variant groups
+model ProductVariantOption {
+  id               String                   @id @default(cuid())
+  variantGroupId   String                   @map("variant_group_id")
+  value            String                   // "Left Hand", "1 1/2 inch"
+  displayText      String                   @map("display_text") // "Left Hand", "1 1/2 inch"
+  priceModifier    Decimal?                 @default(0) @map("price_modifier") @db.Decimal(10,2)
+  sortOrder        Int?                     @map("sort_order")
+  
+  variantGroup     ProductVariantGroup      @relation(fields: [variantGroupId], references: [id], onDelete: Cascade)
+  variantSelections ProductVariantSelection[]
+  
+  @@unique([variantGroupId, value])
+  @@index([variantGroupId, sortOrder])
+  @@map("product_variant_options")
+}
+
+// Individual product variants (specific SKU combinations)
+model CatalogProductVariant {
+  id               String                   @id @default(cuid())
+  productId        String                   @map("product_id")
+  sku              String                   @unique // Generated: IZW-0027-1.5-LH-KK
+  title            String                   // "Door Lock 40mm - 1½" - Left Hand - Key-Knob"
+  price            Decimal?                 @db.Decimal(10,2)
+  inventoryQty     Int                      @default(0) @map("inventory_qty")
+  isActive         Boolean                  @default(true) @map("is_active")
+  
+  product          Product                  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  selections       ProductVariantSelection[]
+  rfqItems         RfqItem[]
+  
+  @@index([productId, isActive])
+  @@index([sku])
+  @@index([isActive])
+  @@map("catalog_product_variants")
+}
+
+// Links variants to their selected options
+model ProductVariantSelection {
+  id               String                   @id @default(cuid())
+  variantId        String                   @map("variant_id")
+  optionId         String                   @map("option_id")
+  
+  variant          CatalogProductVariant    @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  option           ProductVariantOption     @relation(fields: [optionId], references: [id], onDelete: Cascade)
+  
+  @@unique([variantId, optionId])
+  @@index([variantId])
+  @@index([optionId])
+  @@map("product_variant_selections")
+}
+
+// Technical specifications for search/filtering
+model TechnicalSpecification {
+  id           String    @id @default(cuid())
+  productId    String    @map("product_id")
+  category     String    // "dimension", "current", "force", "weight"
+  name         String    // "Dimension", "Current Rating", "Force"
+  value        String    // "55", "7", "100"
+  unit         String?   // "mm", "N", "A"
+  isSearchable Boolean   @default(true) @map("is_searchable")
+  
+  product      Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
+  
+  @@unique([productId, category, value])
+  // Optimized index for technical specification filtering
+  @@index([category, isSearchable, value])
+  @@index([productId, category])
+  @@map("technical_specifications")
+}
+
+// Product images
+model ProductImage {
+  id          String  @id @default(cuid())
+  productId   String  @map("product_id")
+  imageUrl    String? @map("image_url")
+  localPath   String  @map("local_path")
+  imageOrder  Int?    @map("image_order")
+  isPrimary   Boolean @default(false) @map("is_primary")
+  fileExists  Boolean @default(false) @map("file_exists")
+  
+  product     Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  
+  @@unique([productId, localPath])
+  @@index([productId, isPrimary])
+  @@index([productId, imageOrder])
+  @@map("product_images")
+}
+
+// Product catalogs (PDFs)
+model ProductCatalog {
+  id            String    @id @default(cuid())
+  productId     String    @map("product_id")
+  pdfUrl        String    @map("pdf_url")
+  localPdfPath  String?   @map("local_pdf_path")
+  fileSize      Int?      @map("file_size")
+  downloadStatus String   @default("pending") @map("download_status")
+  
+  product       Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
+  
+  @@unique([productId])
+  @@index([downloadStatus])
+  @@map("product_catalogs")
+}
+
+// Cart items for B2B customers
+model CartItem {
+  id               String      @id @default(cuid())
+  customerId       String      @map("customer_id")
+  shopifyProductId String      @map("shopify_product_id")
+  shopifyVariantId String      @map("shopify_variant_id")
+  quantity         Int
+  unitPrice        Decimal     @map("unit_price") @db.Decimal(10,2)
+  totalPrice       Decimal     @map("total_price") @db.Decimal(10,2)
+  createdAt        DateTime    @default(now()) @map("created_at")
+  updatedAt        DateTime    @updatedAt @map("updated_at")
+  
+  // Relationships
+  customer         Dealer      @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  product          Product?    @relation(fields: [shopifyProductId], references: [shopifyProductId], onDelete: Cascade)
+  
+  @@unique([customerId, shopifyVariantId])
+  @@index([customerId])
+  @@map("cart_items")
+}
+
+// Saved carts for B2B customers
+model SavedCart {
+  id         String        @id @default(cuid())
+  customerId String        @map("customer_id")
+  name       String
+  itemCount  Int           @default(0) @map("item_count")
+  totalValue Decimal       @default(0) @map("total_value") @db.Decimal(10,2)
+  createdAt  DateTime      @default(now()) @map("created_at")
+  updatedAt  DateTime      @updatedAt @map("updated_at")
+  
+  // Relationships
+  customer   Dealer        @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  items      SavedCartItem[]
+  
+  @@index([customerId])
+  @@map("saved_carts")
+}
+
+// Items within saved carts
+model SavedCartItem {
+  id               String      @id @default(cuid())
+  savedCartId      String      @map("saved_cart_id")
+  shopifyProductId String      @map("shopify_product_id")
+  shopifyVariantId String      @map("shopify_variant_id")
+  quantity         Int
+  unitPrice        Decimal     @map("unit_price") @db.Decimal(10,2)
+  totalPrice       Decimal     @map("total_price") @db.Decimal(10,2)
+  createdAt        DateTime    @default(now()) @map("created_at")
+  
+  // Relationships
+  savedCart        SavedCart   @relation(fields: [savedCartId], references: [id], onDelete: Cascade)
+  product          Product?    @relation(fields: [shopifyProductId], references: [shopifyProductId], onDelete: Cascade)
+  
+  @@index([savedCartId])
+  @@map("saved_cart_items")
+}
+
+// Volume discounts for products
+model VolumeDiscount {
+  id               String      @id @default(cuid())
+  shopifyProductId String      @map("shopify_product_id")
+  minQuantity      Int         @map("min_quantity")
+  discountPercent  Decimal     @map("discount_percent") @db.Decimal(5,2)
+  createdAt        DateTime    @default(now()) @map("created_at")
+  updatedAt        DateTime    @updatedAt @map("updated_at")
+  
+  // Relationships
+  product          Product?    @relation(fields: [shopifyProductId], references: [shopifyProductId], onDelete: Cascade)
+  
+  @@unique([shopifyProductId, minQuantity])
+  @@index([shopifyProductId, minQuantity])
+  @@map("volume_discounts")
+}
+
+// NEW: Audit logging for business-critical operations
+model AuditLog {
+  id          String   @id @default(cuid())
+  userId      String?  @map("user_id")
+  action      String   // "CREATE", "UPDATE", "DELETE"
+  tableName   String   @map("table_name")
+  recordId    String   @map("record_id")
+  oldValues   Json?    @map("old_values")
+  newValues   Json?    @map("new_values")
+  ipAddress   String?  @map("ip_address")
+  userAgent   String?  @map("user_agent")
+  createdAt   DateTime @default(now()) @map("created_at")
+  
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([tableName, recordId])
+  @@index([action, createdAt(sort: Desc)])
+  @@map("audit_logs")
+}
+
+// NEW: Multi-location inventory support
+model Location {
+  id               String              @id @default(cuid())
+  name             String
+  code             String              @unique
+  address          String?
+  isActive         Boolean             @default(true) @map("is_active")
+  createdAt        DateTime            @default(now()) @map("created_at")
+  updatedAt        DateTime            @updatedAt @map("updated_at")
+  
+  inventoryItems   InventoryLocation[]
+  
+  @@index([code])
+  @@index([isActive])
+  @@map("locations")
+}
+
+// NEW: Location-specific inventory tracking
+model InventoryLocation {
+  id               String   @id @default(cuid())
+  locationId       String   @map("location_id")
+  shopifyProductId String   @map("shopify_product_id")
+  shopifyVariantId String?  @map("shopify_variant_id")
+  quantity         Int      @default(0)
+  reservedQty      Int      @default(0) @map("reserved_qty")
+  lastUpdated      DateTime @default(now()) @map("last_updated")
+  
+  location         Location @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  product          Product? @relation(fields: [shopifyProductId], references: [shopifyProductId], onDelete: Cascade)
+  
+  @@unique([locationId, shopifyProductId, shopifyVariantId])
+  @@index([shopifyProductId, shopifyVariantId])
+  @@index([locationId, quantity])
+  @@map("inventory_locations")
+}
+
+// Enhanced Product model with inventory relationship
+model Product {
+  // ... existing fields ...
+  inventoryLocations InventoryLocation[]
+}
+
+// Enums
+enum AccountType {
+  DEALER     // B2B dealers with volume pricing
+  PRO        // Professional accounts with pro pricing
+  ACCOUNT_REP // Internal account representatives
+}
+
+enum AccountTier {
+  STANDARD
+  PREMIUM
+  ENTERPRISE
+}
+
+// Legacy enum - kept for backward compatibility
+enum DealerTier {
+  STANDARD
+  PREMIUM
+  ENTERPRISE
+}
+
+enum RfqStatus {
+  PENDING
+  IN_REVIEW
+  QUOTED
+  ACCEPTED
+  DECLINED
+  EXPIRED
+}
+
+enum RfqPriority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
+enum SyncOperation {
+  CREATE
+  UPDATE
+  DELETE
+  SKIP
+}
+
+enum SyncStatus {
+  SUCCESS
+  FAILED
+  PARTIAL
+}
+
+// New enum for product types
+enum ProductTypeEnum {
+  SIMPLE    // Single SKU, no variants (884 products)
+  VARIABLE  // Has selectable variants (63 products)
+}

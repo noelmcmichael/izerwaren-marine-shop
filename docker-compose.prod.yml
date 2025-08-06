@@ -1,0 +1,94 @@
+# Production configuration for docker-compose
+# Usage: docker-compose -f docker-compose.yml -f docker-compose.prod.yml up
+# 
+# SECURITY NOTE: This is for local production testing only
+# Real production deployments use Cloud Run with Secret Manager
+
+services:
+  # Production backend configuration
+  backend:
+    build:
+      context: .
+      dockerfile: apps/backend/Dockerfile
+      target: production
+    environment:
+      NODE_ENV: production
+      # Non-sensitive configuration
+      GOOGLE_CLOUD_PROJECT: ${GOOGLE_CLOUD_PROJECT:-local-dev}
+      # Secrets loaded from .env.local.production (not committed)
+    env_file:
+      - .env.local.production  # Create this file locally with your secrets
+    # Remove development volumes
+    volumes: []
+    ports:
+      - "3001:3001"
+    command: ["node", "dist/server.js"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Production frontend configuration  
+  frontend:
+    build:
+      context: .
+      dockerfile: apps/frontend/Dockerfile
+      target: production
+    environment:
+      NODE_ENV: production
+      NEXT_TELEMETRY_DISABLED: 1
+      # API connection to backend service
+      NEXT_PUBLIC_API_URL: http://backend:3001
+    env_file:
+      - .env.local.production  # Create this file locally with your secrets
+    # Remove development volumes
+    volumes: []
+    ports:
+      - "3000:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Production database (external in real production)
+  database:
+    environment:
+      POSTGRES_DB: izerwaren_prod
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      # Use Docker secrets for password
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    secrets:
+      - db_password
+    # Restrict ports (internal only)  
+    ports: []
+    volumes:
+      - postgres_prod_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d izerwaren_prod"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Remove pgadmin in production
+  pgadmin:
+    profiles:
+      - disabled
+
+# Docker secrets for local production testing
+secrets:
+  db_password:
+    file: ./secrets/db_password.txt  # Create this file locally
+
+volumes:
+  postgres_prod_data:
+    driver: local
+
+# Security notes:
+# 1. Create .env.local.production with your development secrets (NOT committed)
+# 2. Create ./secrets/db_password.txt with database password (NOT committed)  
+# 3. Real production uses Cloud Run + Secret Manager, not Docker Compose

@@ -1,0 +1,152 @@
+{
+  "config": {
+    "configFile": "/Users/noelmcmichael/Workspace/izerwaren_revamp_2_0/apps/frontend/playwright.config.ts",
+    "rootDir": "/Users/noelmcmichael/Workspace/izerwaren_revamp_2_0/apps/frontend/tests",
+    "forbidOnly": false,
+    "fullyParallel": false,
+    "globalSetup": "/Users/noelmcmichael/Workspace/izerwaren_revamp_2_0/apps/frontend/tests/global-setup.ts",
+    "globalTeardown": "/Users/noelmcmichael/Workspace/izerwaren_revamp_2_0/apps/frontend/tests/global-teardown.ts",
+    "globalTimeout": 0,
+    "grep": {},
+    "grepInvert": null,
+    "maxFailures": 0,
+    "metadata": {},
+    "preserveOutput": "always",
+    "reporter": [
+      [
+        "html",
+        {
+          "outputFolder": "test-results/html-report"
+        }
+      ],
+      [
+        "json",
+        {
+          "outputFile": "test-results/results.json"
+        }
+      ],
+      [
+        "junit",
+        {
+          "outputFile": "test-results/results.xml"
+        }
+      ],
+      [
+        "list",
+        null
+      ]
+    ],
+    "reportSlowTests": {
+      "max": 5,
+      "threshold": 300000
+    },
+    "quiet": false,
+    "projects": [
+      {
+        "outputDir": "/Users/noelmcmichael/Workspace/izerwaren_revamp_2_0/apps/frontend/test-results/artifacts",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {},
+        "id": "smoke-tests-chromium",
+        "name": "smoke-tests-chromium",
+        "testDir": "/Users/noelmcmichael/Workspace/izerwaren_revamp_2_0/apps/frontend/tests",
+        "testIgnore": [],
+        "testMatch": [
+          "**/smoke/**/*.spec.ts"
+        ],
+        "timeout": 60000
+      },
+      {
+        "outputDir": "/Users/noelmcmichael/Workspace/izerwaren_revamp_2_0/apps/frontend/test-results/artifacts",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {},
+        "id": "smoke-tests-firefox",
+        "name": "smoke-tests-firefox",
+        "testDir": "/Users/noelmcmichael/Workspace/izerwaren_revamp_2_0/apps/frontend/tests",
+        "testIgnore": [],
+        "testMatch": [
+          "**/smoke/**/*.spec.ts"
+        ],
+        "timeout": 60000
+      },
+      {
+        "outputDir": "/Users/noelmcmichael/Workspace/izerwaren_revamp_2_0/apps/frontend/test-results/artifacts",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {},
+        "id": "integration-tests",
+        "name": "integration-tests",
+        "testDir": "/Users/noelmcmichael/Workspace/izerwaren_revamp_2_0/apps/frontend/tests",
+        "testIgnore": [],
+        "testMatch": [
+          "**/integration/**/*.spec.ts"
+        ],
+        "timeout": 30000
+      },
+      {
+        "outputDir": "/Users/noelmcmichael/Workspace/izerwaren_revamp_2_0/apps/frontend/test-results/artifacts",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {},
+        "id": "deployment-validation",
+        "name": "deployment-validation",
+        "testDir": "/Users/noelmcmichael/Workspace/izerwaren_revamp_2_0/apps/frontend/tests",
+        "testIgnore": [],
+        "testMatch": [
+          "**/deployment/**/*.spec.ts"
+        ],
+        "timeout": 120000
+      },
+      {
+        "outputDir": "/Users/noelmcmichael/Workspace/izerwaren_revamp_2_0/apps/frontend/test-results/artifacts",
+        "repeatEach": 1,
+        "retries": 0,
+        "metadata": {},
+        "id": "mobile-smoke",
+        "name": "mobile-smoke",
+        "testDir": "/Users/noelmcmichael/Workspace/izerwaren_revamp_2_0/apps/frontend/tests",
+        "testIgnore": [],
+        "testMatch": [
+          "**/smoke/**/*.spec.ts"
+        ],
+        "timeout": 90000
+      }
+    ],
+    "shard": null,
+    "updateSnapshots": "missing",
+    "updateSourceMethod": "patch",
+    "version": "1.54.2",
+    "workers": 1,
+    "webServer": {
+      "command": "npm run dev",
+      "port": 3000,
+      "reuseExistingServer": true,
+      "timeout": 120000,
+      "env": {
+        "NODE_ENV": "test"
+      }
+    }
+  },
+  "suites": [],
+  "errors": [
+    {
+      "message": "Error: Base URL not configured for tests",
+      "stack": "Error: Base URL not configured for tests\n    at validateEnvironmentConfig (/Users/noelmcmichael/Workspace/izerwaren_revamp_2_0/apps/frontend/tests/global-setup.ts:64:11)\n    at globalSetup (/Users/noelmcmichael/Workspace/izerwaren_revamp_2_0/apps/frontend/tests/global-setup.ts:25:11)",
+      "location": {
+        "file": "/Users/noelmcmichael/Workspace/izerwaren_revamp_2_0/apps/frontend/tests/global-setup.ts",
+        "column": 11,
+        "line": 64
+      },
+      "snippet": "   at global-setup.ts:64\n\n  62 |   const baseURL = config.use?.baseURL;\n  63 |   if (!baseURL) {\n> 64 |     throw new Error('Base URL not configured for tests');\n     |           ^\n  65 |   }\n  66 |   \n  67 |   // Validate required environment variables"
+    }
+  ],
+  "stats": {
+    "startTime": "2025-08-05T02:15:20.880Z",
+    "duration": 11.400999999999954,
+    "expected": 0,
+    "skipped": 0,
+    "unexpected": 0,
+    "flaky": 0
+  }
+}

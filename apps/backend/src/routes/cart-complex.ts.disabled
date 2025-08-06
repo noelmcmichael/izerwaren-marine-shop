@@ -1,0 +1,388 @@
+import { Router } from 'express';
+import { body, param, query, validationResult } from 'express-validator';
+import { prisma } from '@izerwaren/database';
+import multer from 'multer';
+import type { Request, Response } from 'express';
+import { AuthService, CartService, PricingService } from '../services';
+
+// Extend Express Request type to include customer
+interface AuthenticatedRequest extends Request {
+  customer?: {
+    id: string;
+    email: string;
+    name?: string;
+  };
+}
+
+const router = Router();
+const upload = multer({ dest: 'uploads/' });
+
+// Middleware to authenticate customer and extract profile
+const authenticateCustomer = async (req: AuthenticatedRequest, res: Response, next: any) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer ')) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    const token = authHeader.substring(7);
+    const customer = await AuthService.validateCustomerToken(token);
+    
+    if (!customer) {
+      return res.status(401).json({ error: 'Invalid token' });
+    }
+
+    req.customer = customer;
+    next();
+  } catch (error) {
+    console.error('Authentication error:', error);
+    res.status(401).json({ error: 'Authentication failed' });
+  }
+};
+
+// Validation middleware
+const validateRequest = (req: Request, res: Response, next: any) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ 
+      error: 'Validation failed', 
+      details: errors.array() 
+    });
+  }
+  next();
+};
+
+// GET /api/v1/customers/cart - Get current cart with pricing
+router.get('/', authenticateCustomer, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const customerId = req.customer.profile.id;
+    const cart = await CartService.getCart(customerId);
+    
+    // Apply tier-based pricing
+    const cartWithPricing = await PricingService.applyCartPricing(cart, req.customer);
+    
+    res.json(cartWithPricing);
+  } catch (error) {
+    console.error('Get cart error:', error);
+    res.status(500).json({ error: 'Failed to retrieve cart' });
+  }
+});
+
+// POST /api/v1/customers/cart/items - Add single item to cart
+router.post('/items', 
+  authenticateCustomer,
+  [
+    body('productId').isString().notEmpty().withMessage('Product ID is required'),
+    body('variantId').isString().notEmpty().withMessage('Variant ID is required'),
+    body('quantity').isInt({ min: 1 }).withMessage('Quantity must be positive integer'),
+  ],
+  validateRequest,
+  async (req: Request, res: Response) => {
+    try {
+      const customerId = req.customer.profile.id;
+      const { productId, variantId, quantity } = req.body;
+
+      const cart = await CartService.addItem(customerId, {
+        shopify_product_id: productId,
+        shopify_variant_id: variantId,
+        quantity
+      });
+
+      const cartWithPricing = await PricingService.applyCartPricing(cart, req.customer);
+      res.json(cartWithPricing);
+    } catch (error) {
+      console.error('Add item error:', error);
+      if (error.message.includes('not found')) {
+        res.status(404).json({ error: error.message });
+      } else if (error.message.includes('insufficient stock')) {
+        res.status(400).json({ error: error.message });
+      } else {
+        res.status(500).json({ error: 'Failed to add item to cart' });
+      }
+    }
+  }
+);
+
+// PATCH /api/v1/customers/cart/items/:itemId - Update item quantity
+router.patch('/items/:itemId',
+  authenticateCustomer,
+  [
+    param('itemId').isUUID().withMessage('Invalid item ID'),
+    body('quantity').isInt({ min: 0 }).withMessage('Quantity must be non-negative integer'),
+  ],
+  validateRequest,
+  async (req: Request, res: Response) => {
+    try {
+      const customerId = req.customer.profile.id;
+      const { itemId } = req.params;
+      const { quantity } = req.body;
+
+      const cart = await CartService.updateQuantity(customerId, itemId, quantity);
+      const cartWithPricing = await PricingService.applyCartPricing(cart, req.customer);
+      
+      res.json(cartWithPricing);
+    } catch (error) {
+      console.error('Update quantity error:', error);
+      if (error.message.includes('not found')) {
+        res.status(404).json({ error: error.message });
+      } else if (error.message.includes('insufficient stock')) {
+        res.status(400).json({ error: error.message });
+      } else {
+        res.status(500).json({ error: 'Failed to update quantity' });
+      }
+    }
+  }
+);
+
+// DELETE /api/v1/customers/cart/items/:itemId - Remove item from cart
+router.delete('/items/:itemId',
+  authenticateCustomer,
+  [
+    param('itemId').isUUID().withMessage('Invalid item ID'),
+  ],
+  validateRequest,
+  async (req: Request, res: Response) => {
+    try {
+      const customerId = req.customer.profile.id;
+      const { itemId } = req.params;
+
+      const cart = await CartService.removeItem(customerId, itemId);
+      const cartWithPricing = await PricingService.applyCartPricing(cart, req.customer);
+      
+      res.json(cartWithPricing);
+    } catch (error) {
+      console.error('Remove item error:', error);
+      if (error.message.includes('not found')) {
+        res.status(404).json({ error: error.message });
+      } else {
+        res.status(500).json({ error: 'Failed to remove item' });
+      }
+    }
+  }
+);
+
+// DELETE /api/v1/customers/cart - Clear entire cart
+router.delete('/',
+  authenticateCustomer,
+  async (req: Request, res: Response) => {
+    try {
+      const customerId = req.customer.profile.id;
+      const cart = await CartService.clearCart(customerId);
+      const cartWithPricing = await PricingService.applyCartPricing(cart, req.customer);
+      
+      res.json(cartWithPricing);
+    } catch (error) {
+      console.error('Clear cart error:', error);
+      res.status(500).json({ error: 'Failed to clear cart' });
+    }
+  }
+);
+
+// POST /api/v1/customers/cart/bulk/add - Add multiple items
+router.post('/bulk/add',
+  authenticateCustomer,
+  [
+    body('items').isArray({ min: 1 }).withMessage('Items array is required'),
+    body('items.*.productId').isString().notEmpty().withMessage('Product ID is required'),
+    body('items.*.variantId').isString().notEmpty().withMessage('Variant ID is required'),
+    body('items.*.quantity').isInt({ min: 1 }).withMessage('Quantity must be positive integer'),
+  ],
+  validateRequest,
+  async (req: Request, res: Response) => {
+    try {
+      const customerId = req.customer.profile.id;
+      const { items } = req.body;
+
+      const formattedItems = items.map((item: any) => ({
+        shopify_product_id: item.productId,
+        shopify_variant_id: item.variantId,
+        quantity: item.quantity
+      }));
+
+      const cart = await CartService.addMultipleItems(customerId, formattedItems);
+      const cartWithPricing = await PricingService.applyCartPricing(cart, req.customer);
+      
+      res.json(cartWithPricing);
+    } catch (error) {
+      console.error('Bulk add error:', error);
+      res.status(500).json({ error: 'Failed to add multiple items' });
+    }
+  }
+);
+
+// PATCH /api/v1/customers/cart/bulk/update - Update multiple quantities
+router.patch('/bulk/update',
+  authenticateCustomer,
+  [
+    body('updates').isArray({ min: 1 }).withMessage('Updates array is required'),
+    body('updates.*.itemId').isUUID().withMessage('Invalid item ID'),
+    body('updates.*.quantity').isInt({ min: 0 }).withMessage('Quantity must be non-negative integer'),
+  ],
+  validateRequest,
+  async (req: Request, res: Response) => {
+    try {
+      const customerId = req.customer.profile.id;
+      const { updates } = req.body;
+
+      const cart = await CartService.updateMultipleQuantities(customerId, updates);
+      const cartWithPricing = await PricingService.applyCartPricing(cart, req.customer);
+      
+      res.json(cartWithPricing);
+    } catch (error) {
+      console.error('Bulk update error:', error);
+      res.status(500).json({ error: 'Failed to update multiple quantities' });
+    }
+  }
+);
+
+// POST /api/v1/customers/cart/save - Save cart with optional name
+router.post('/save',
+  authenticateCustomer,
+  [
+    body('name').optional().isString().isLength({ max: 100 }).withMessage('Name must be string, max 100 characters'),
+  ],
+  validateRequest,
+  async (req: Request, res: Response) => {
+    try {
+      const customerId = req.customer.profile.id;
+      const { name } = req.body;
+
+      const cartId = await CartService.saveCart(customerId, name);
+      res.json({ cartId });
+    } catch (error) {
+      console.error('Save cart error:', error);
+      res.status(500).json({ error: 'Failed to save cart' });
+    }
+  }
+);
+
+// POST /api/v1/customers/cart/load/:cartId - Load saved cart
+router.post('/load/:cartId',
+  authenticateCustomer,
+  [
+    param('cartId').isUUID().withMessage('Invalid cart ID'),
+  ],
+  validateRequest,
+  async (req: Request, res: Response) => {
+    try {
+      const customerId = req.customer.profile.id;
+      const { cartId } = req.params;
+
+      const cart = await CartService.loadCart(customerId, cartId);
+      const cartWithPricing = await PricingService.applyCartPricing(cart, req.customer);
+      
+      res.json(cartWithPricing);
+    } catch (error) {
+      console.error('Load cart error:', error);
+      if (error.message.includes('not found')) {
+        res.status(404).json({ error: error.message });
+      } else {
+        res.status(500).json({ error: 'Failed to load cart' });
+      }
+    }
+  }
+);
+
+// GET /api/v1/customers/cart/saved - Get list of saved carts
+router.get('/saved',
+  authenticateCustomer,
+  async (req: Request, res: Response) => {
+    try {
+      const customerId = req.customer.profile.id;
+      const savedCarts = await CartService.getSavedCarts(customerId);
+      res.json(savedCarts);
+    } catch (error) {
+      console.error('Get saved carts error:', error);
+      res.status(500).json({ error: 'Failed to retrieve saved carts' });
+    }
+  }
+);
+
+// GET /api/v1/customers/cart/validate - Validate current cart
+router.get('/validate',
+  authenticateCustomer,
+  async (req: Request, res: Response) => {
+    try {
+      const customerId = req.customer.profile.id;
+      const validationResults = await CartService.validateCart(customerId, req.customer);
+      res.json(validationResults);
+    } catch (error) {
+      console.error('Cart validation error:', error);
+      res.status(500).json({ error: 'Failed to validate cart' });
+    }
+  }
+);
+
+// GET /api/v1/customers/cart/export - Export cart in CSV or PDF format
+router.get('/export',
+  authenticateCustomer,
+  [
+    query('format').isIn(['csv', 'pdf']).withMessage('Format must be csv or pdf'),
+  ],
+  validateRequest,
+  async (req: Request, res: Response) => {
+    try {
+      const customerId = req.customer.profile.id;
+      const format = req.query.format as 'csv' | 'pdf';
+
+      const { buffer, filename, mimeType } = await CartService.exportCart(customerId, format, req.customer);
+      
+      res.setHeader('Content-Type', mimeType);
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      res.send(buffer);
+    } catch (error) {
+      console.error('Export cart error:', error);
+      res.status(500).json({ error: 'Failed to export cart' });
+    }
+  }
+);
+
+// POST /api/v1/customers/cart/bulk/upload - Upload bulk order from CSV/Excel
+router.post('/bulk/upload',
+  authenticateCustomer,
+  upload.single('file'),
+  async (req: Request, res: Response) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({ error: 'File is required' });
+      }
+
+      const customerId = req.customer.profile.id;
+      const result = await CartService.uploadBulkOrder(customerId, req.file);
+      
+      res.json(result);
+    } catch (error) {
+      console.error('Bulk upload error:', error);
+      res.status(500).json({ error: 'Failed to process bulk upload' });
+    }
+  }
+);
+
+// POST /api/v1/customers/cart/reorder/:orderId - Quick reorder from order history
+router.post('/reorder/:orderId',
+  authenticateCustomer,
+  [
+    param('orderId').isString().notEmpty().withMessage('Order ID is required'),
+  ],
+  validateRequest,
+  async (req: Request, res: Response) => {
+    try {
+      const customerId = req.customer.profile.id;
+      const { orderId } = req.params;
+
+      const cart = await CartService.reorderFromHistory(customerId, orderId);
+      const cartWithPricing = await PricingService.applyCartPricing(cart, req.customer);
+      
+      res.json(cartWithPricing);
+    } catch (error) {
+      console.error('Reorder error:', error);
+      if (error.message.includes('not found')) {
+        res.status(404).json({ error: error.message });
+      } else {
+        res.status(500).json({ error: 'Failed to reorder from history' });
+      }
+    }
+  }
+);
+
+export default router;

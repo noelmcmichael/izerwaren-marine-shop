@@ -184,7 +184,7 @@ jobs:
         run: npm audit --audit-level high
 
       - name: Scan for secrets
-        uses: trufflesecurity/trufflehog@v3.63.2-beta
+        uses: trufflesecurity/trufflehog@v3.90.6
         with:
           path: ./
           base: main
